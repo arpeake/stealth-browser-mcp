@@ -632,7 +632,7 @@ class TestSaveToSeedGatedRealBrowser(_TempDataDir):
                     self.assertEqual(state1_after_login, "logged_in")
 
                     # Step 5: Save session 1 state back to seed
-                    save_res = await server.save_to_seed(s1_session_id)
+                    save_res = await server.save_to_seed.fn(s1_session_id)
                     self.assertEqual(save_res["status"], "ok")
                     self.assertEqual(save_res["seed"], seed_name)
                     self.assertGreater(save_res["copied_count"], 0)
