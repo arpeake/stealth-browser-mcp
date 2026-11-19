@@ -207,6 +207,14 @@ class LockTests(unittest.TestCase):
         self.assertEqual(lock.calls, ["acquire", "release"])
         self.assertFalse(lock.held)
 
+    def test_clipboard_lock_path_is_always_absolute(self):
+        """Clipboard lock path is always absolute and never relative even if data dir is empty."""
+        for val in ("", "   "):
+            os.environ[DATA_DIR_ENV] = val
+            lock = os_clipboard._clipboard_lock()
+            self.assertTrue(Path(lock.path).is_absolute())
+            self.assertFalse(str(lock.path).startswith("locks"))
+
 
 if __name__ == "__main__":
     unittest.main()

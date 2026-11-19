@@ -18,6 +18,7 @@ import nodriver as uc
 
 from stealth_browser_mcp import dom_handler, element_kind, fill_tool, server
 from stealth_browser_mcp.element_kind import ElementKind
+from stealth_browser_mcp.paths import DATA_DIR_ENV
 from stealth_browser_mcp.secrets_env import (
     REDACTED_PLACEHOLDER,
     SECRET_ENV_PREFIX,
@@ -197,9 +198,15 @@ class ClassifyAndStrategyTableTests(unittest.TestCase):
     """Table-driven unit tests verifying strategy=auto across every element kind."""
 
     def setUp(self):
+        self._orig_env = os.environ.copy()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ[DATA_DIR_ENV] = self._tmp.name
         clear_secrets()
 
     def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._orig_env)
+        self._tmp.cleanup()
         clear_secrets()
 
     def test_every_kind_row_passes_with_strategy_auto(self):
@@ -344,6 +351,16 @@ class ClassifyAndStrategyTableTests(unittest.TestCase):
 class VerifyMismatchReportingTests(unittest.TestCase):
     """Tests for mismatch reporting when read-back does not match expected value."""
 
+    def setUp(self):
+        self._orig_env = os.environ.copy()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ[DATA_DIR_ENV] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._orig_env)
+        self._tmp.cleanup()
+
     def test_mismatch_reports_verified_false_and_diff(self):
         tab = FakeFillTab(
             backend_node_id=42,
@@ -374,11 +391,14 @@ class PasswordAndSecretSecurityTests(unittest.TestCase):
 
     def setUp(self):
         self._orig_environ = dict(os.environ)
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ[DATA_DIR_ENV] = self._tmp.name
         clear_secrets()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._orig_environ)
+        self._tmp.cleanup()
         clear_secrets()
 
     def test_password_field_value_never_echoed_in_result(self):
@@ -500,6 +520,16 @@ class PasswordAndSecretSecurityTests(unittest.TestCase):
 
 class UnsupportedKindsAndExplicitStrategyTests(unittest.TestCase):
     """Tests for unsupported element kinds and strategy override options."""
+
+    def setUp(self):
+        self._orig_env = os.environ.copy()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ[DATA_DIR_ENV] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._orig_env)
+        self._tmp.cleanup()
 
     def test_button_unsupported(self):
         tab = FakeFillTab(
@@ -653,6 +683,16 @@ class PasteModePlumbingTests(unittest.TestCase):
 )
 class TestFillToolGatedBrowser(unittest.TestCase):
     """Gated real-browser integration tests with local fixture harness."""
+
+    def setUp(self):
+        self._orig_env = os.environ.copy()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ[DATA_DIR_ENV] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._orig_env)
+        self._tmp.cleanup()
 
     def test_fill_real_browser_inputs(self):
         """Test filling real inputs in Chrome headless on inputs.html."""

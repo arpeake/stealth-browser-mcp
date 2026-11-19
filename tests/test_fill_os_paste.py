@@ -1,6 +1,7 @@
 """Unit tests and gated browser integration tests for fill_os_paste (SB-15)."""
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -378,6 +379,17 @@ class FillOSPasteUnitTests(unittest.TestCase):
 class TestFillOSPasteGatedBrowser(unittest.TestCase):
     """Gated real-browser integration tests with paste-only fixture editor."""
 
+    def setUp(self) -> None:
+        self._orig_env = os.environ.copy()
+        self._tmp_data = tempfile.TemporaryDirectory()
+        os.environ[DATA_DIR_ENV] = self._tmp_data.name
+        os.environ[ENV_FLAG] = "1"
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._orig_env)
+        self._tmp_data.cleanup()
+
     def test_paste_only_fixture_editor_accepts(self) -> None:
         """Paste-only fixture editor accepts paste keystrokes with in-memory fake clipboard backend."""
         from stealth_browser_mcp.browser_launcher import _stop_process, launch_browser
@@ -395,11 +407,6 @@ class TestFillOSPasteGatedBrowser(unittest.TestCase):
                 executable = "/usr/bin/google-chrome"
             else:
                 executable = check_browser_executable() or "/usr/bin/google-chrome"
-
-        orig_env = os.environ.copy()
-        temp_data_dir = tempfile.mkdtemp(prefix="stealth_os_paste_data_")
-        os.environ[DATA_DIR_ENV] = temp_data_dir
-        os.environ[ENV_FLAG] = "1"
 
         fake_backend = RecordingBackend(current="initial_clipboard_text")
 
@@ -456,7 +463,12 @@ class TestFillOSPasteGatedBrowser(unittest.TestCase):
                     self.assertTrue(res.get("success"))
                     self.assertEqual(res.get("strategy"), "os_paste")
 
-                    key_events = await tab.evaluate("window.__keyEvents || []")
+                    raw_events = await tab.evaluate("JSON.stringify(window.__keyEvents)")
+                    if hasattr(raw_events, "value"):
+                        raw_events = raw_events.value
+                    elif isinstance(raw_events, dict) and "value" in raw_events:
+                        raw_events = raw_events["value"]
+                    key_events = json.loads(raw_events) if isinstance(raw_events, str) else (raw_events or [])
                     self.assertTrue(
                         any(
                             ev.get("key") in ("v", "V") and (ev.get("ctrlKey") or ev.get("metaKey"))
@@ -518,15 +530,10 @@ class TestFillOSPasteGatedBrowser(unittest.TestCase):
                 # 5. Remove temp profile directory with retrying cleanup
                 _safe_cleanup_dir(temp_dir)
 
-        try:
-            with unittest.mock.patch.object(
-                os_clipboard, "_get_backend", _fake_backend_factory(fake_backend)
-            ):
-                asyncio.run(run_browser())
-        finally:
-            os.environ.clear()
-            os.environ.update(orig_env)
-            _safe_cleanup_dir(temp_data_dir)
+        with unittest.mock.patch.object(
+            os_clipboard, "_get_backend", _fake_backend_factory(fake_backend)
+        ):
+            asyncio.run(run_browser())
 
 
 if __name__ == "__main__":

@@ -23,10 +23,11 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Optional, Protocol
 
 from .file_lock import FileLock
-from .paths import data_dir
+from .paths import data_dir, user_data_dir
 
 # Opt-in flag. Clipboard access is disabled unless this is exactly "1".
 ENV_FLAG = "STEALTH_ALLOW_OS_CLIPBOARD"
@@ -61,7 +62,11 @@ def _clipboard_lock():
     runtime. The parent directory is created if missing so
     :class:`file_lock.FileLock` can open the lock file.
     """
-    path = data_dir() / "locks" / _CLIPBOARD_LOCK_NAME
+    base = data_dir()
+    if not base or str(base).strip() in ("", "."):
+        base = user_data_dir()
+    base = Path(base).resolve()
+    path = (base / "locks" / _CLIPBOARD_LOCK_NAME).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(str(path), timeout=10.0)
 
