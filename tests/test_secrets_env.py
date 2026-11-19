@@ -43,11 +43,15 @@ class ResolveValueEnvTests(unittest.TestCase):
             "API_KEY",
             "stealth_secret_lower",
             "MY_STEALTH_SECRET_KEY",
+            "MY_STEALTH_SECRET_X",
             "",
+            "INVALID=KEY",
             "PASSWORD",
         ]
         for name in invalid_names:
-            os.environ[name] = "super_secret_value_123"
+            is_legal = bool(isinstance(name, str) and name and "=" not in name and "\0" not in name)
+            if is_legal:
+                os.environ[name] = "super_secret_value_123"
             with self.subTest(name=name):
                 with self.assertRaises(SecretEnvError) as ctx:
                     resolve_value_env(name)
