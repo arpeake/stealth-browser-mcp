@@ -14,7 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [chrome, edge]
+        include:
+          - browser: chrome
+            exe: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+          - browser: edge
+            exe: 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
     env:
       STEALTH_BROWSER_TESTS: '1'
       GITHUB_ARTIFACT_PATH: test-output
@@ -43,22 +47,24 @@ jobs:
       - run: pip install -e .
 
       - name: Ensure artifact directory exists
-        run: mkdir "$GITHUB_ARTIFACT_PATH"
+        shell: bash
+        run: mkdir -p "$GITHUB_ARTIFACT_PATH"
 
       - name: Run gated tests
+        shell: bash
         env:
-          STEALTH_BROWSER_EXECUTABLE: ${{ runner.temp }}/${{ matrix.browser }}
+          STEALTH_BROWSER_EXECUTABLE: ${{ matrix.exe }}
         run: |
-          python -m unittest tests.test_seed_tools tests.test_session_spawn -v > "$GITHUB_ARTIFACT_PATH/gated.log" 2>&1 || true
+          python -m unittest tests.test_seed_tools tests.test_session_spawn -v > "$GITHUB_ARTIFACT_PATH/gated.log" 2>&1
 
       - name: Cookie carryover (DPAPI / App-Bound), record failure point
         continue-on-error: true
         env:
-          STEALTH_BROWSER_EXECUTABLE: ${{ runner.temp }}/${{ matrix.browser }}
+          STEALTH_BROWSER_EXECUTABLE: ${{ matrix.exe }}
         shell: bash
         run: |
           set +e
-          python -m unittest -v tests.test_session_spawn > "$GITHUB_ARTIFACT_PATH/carryover.log" 2>&1
+          python -m unittest tests.test_session_spawn.TestSessionSpawnGatedRealBrowser -v > "$GITHUB_ARTIFACT_PATH/carryover.log" 2>&1
           code=$?
           if [ $code -ne 0 ]; then
             {
