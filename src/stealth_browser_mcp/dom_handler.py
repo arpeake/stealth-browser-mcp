@@ -337,19 +337,35 @@ class DOMHandler:
         Returns:
             Dict[str, Any]: Result with strategy used, verified bool, and safe preview.
         """
-        from .fill_tool import fill as fill_impl
+        try:
+            from .fill_tool import fill as fill_impl
 
-        return await fill_impl(
-            tab,
-            selector,
-            value=value,
-            value_env=value_env,
-            strategy=strategy,
-            verify=verify,
-            frame=frame,
-            instance_id=instance_id,
-            **kwargs,
-        )
+            return await fill_impl(
+                tab,
+                selector,
+                value=value,
+                value_env=value_env,
+                strategy=strategy,
+                verify=verify,
+                frame=frame,
+                instance_id=instance_id,
+                **kwargs,
+            )
+        except ValueError as exc:
+            if "Unsupported element kind" in str(exc) and "'unknown'" in str(exc):
+                from . import secrets_env
+
+                if value is None and value_env is not None:
+                    value = secrets_env.resolve_value_env(value_env)
+                backend_node_id = await DOMHandler._resolve_target(
+                    tab, selector, DEFAULT_ELEMENT_TIMEOUT, frame=frame, instance_id=instance_id
+                )
+                await input_actions.focus_node(tab, backend_node_id)
+                await input_actions.clear_field(tab, backend_node_id)
+                for char in str(value if value is not None else ""):
+                    await input_actions.type_character(tab, char)
+                return True
+            raise
 
     @staticmethod
     async def paste_text(
