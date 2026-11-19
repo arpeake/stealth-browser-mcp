@@ -20,6 +20,15 @@ import inspect
 import json
 from typing import Any, Callable, Dict, List, Optional
 
+try:
+    from .mcp_sessions import get_current_mcp_session_id, mcp_session_manager
+except Exception:
+    try:
+        from stealth_browser_mcp.mcp_sessions import get_current_mcp_session_id, mcp_session_manager
+    except Exception:
+        get_current_mcp_session_id = None
+        mcp_session_manager = None
+
 MAX_SUMMARY_ELEMENTS = 40
 MAX_NAME_CHARS = 100
 MAX_TITLE_CHARS = 200
@@ -205,20 +214,37 @@ def with_page_summary(func: Callable) -> Callable:
     async def _pre_process(call_locals: Dict[str, Any]) -> None:
         instance_id = call_locals.get("instance_id") or call_locals.get("instance")
         if instance_id:
-            try:
-                from .mcp_sessions import mcp_session_manager
-                mcp_session_manager.check_access(instance_id)
-            except Exception:
-                raise
+            mgr = mcp_session_manager
+            if mgr is None:
+                try:
+                    from .mcp_sessions import mcp_session_manager as mgr
+                except Exception:
+                    try:
+                        from stealth_browser_mcp.mcp_sessions import mcp_session_manager as mgr
+                    except Exception:
+                        mgr = None
+            if mgr is not None:
+                mgr.check_access(instance_id)
 
     async def _post_process(res: Any, call_locals: Dict[str, Any]) -> Any:
         instance_id = call_locals.get("instance_id") or call_locals.get("instance")
         if not instance_id:
             try:
-                from .mcp_sessions import get_current_mcp_session_id, mcp_session_manager
-                sid = get_current_mcp_session_id()
-                if sid:
-                    instance_id = mcp_session_manager.get_instance_for_session(sid)
+                get_sid = get_current_mcp_session_id
+                mgr = mcp_session_manager
+                if get_sid is None or mgr is None:
+                    try:
+                        from .mcp_sessions import get_current_mcp_session_id as get_sid, mcp_session_manager as mgr
+                    except Exception:
+                        try:
+                            from stealth_browser_mcp.mcp_sessions import get_current_mcp_session_id as get_sid, mcp_session_manager as mgr
+                        except Exception:
+                            get_sid = None
+                            mgr = None
+                if get_sid is not None and mgr is not None:
+                    sid = get_sid()
+                    if sid:
+                        instance_id = mgr.get_instance_for_session(sid)
             except Exception:
                 pass
 
@@ -231,7 +257,10 @@ def with_page_summary(func: Callable) -> Callable:
         }
         if instance_id:
             try:
-                from .server import browser_manager
+                try:
+                    from .server import browser_manager
+                except Exception:
+                    from stealth_browser_mcp.server import browser_manager
                 tab = await browser_manager.get_tab(instance_id)
                 if tab:
                     summary = await get_page_summary(tab, instance_id=instance_id)
@@ -245,8 +274,11 @@ def with_page_summary(func: Callable) -> Callable:
         elif isinstance(res, bool):
             return {"success": res, "page": summary}
         else:
-            from fastmcp.tools.tool import ToolResult
-            if isinstance(res, ToolResult):
+            try:
+                from fastmcp.tools.tool import ToolResult
+            except Exception:
+                ToolResult = None
+            if ToolResult is not None and isinstance(res, ToolResult):
                 if res.structured_content is not None and isinstance(res.structured_content, dict):
                     res.structured_content["page"] = summary
                 else:
@@ -258,6 +290,8 @@ def with_page_summary(func: Callable) -> Callable:
     scope["_func"] = func
     scope["_pre_process"] = _pre_process
     scope["_post_process"] = _post_process
+    scope["mcp_session_manager"] = mcp_session_manager
+    scope["get_current_mcp_session_id"] = get_current_mcp_session_id
     code = (
         f"async def wrapper({params_code}):\n"
         f"    await _pre_process(locals())\n"

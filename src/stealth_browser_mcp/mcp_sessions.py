@@ -184,7 +184,10 @@ class MCPSessionManager:
         if not self._browser_manager:
             raise RuntimeError("BrowserManager not configured on MCPSessionManager")
 
-        from .models import BrowserOptions
+        try:
+            from .models import BrowserOptions
+        except Exception:
+            from stealth_browser_mcp.models import BrowserOptions
         effective_seed = seed or os.getenv("STEALTH_DEFAULT_SEED")
         options = BrowserOptions(seed=effective_seed, **spawn_kwargs)
         instance = await self._browser_manager.spawn_browser(options)

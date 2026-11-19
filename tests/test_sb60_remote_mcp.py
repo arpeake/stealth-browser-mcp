@@ -448,13 +448,18 @@ class ScreenshotReturnsImageContentTests(unittest.TestCase):
         # Temporarily mock server.browser_manager
         self._orig_bm = server.browser_manager
         server.browser_manager = self.fake_bm
+        server.mcp_session_manager.set_browser_manager(self.fake_bm)
 
     def tearDown(self):
         server.browser_manager = self._orig_bm
+        server.mcp_session_manager.set_browser_manager(self._orig_bm)
+        server.mcp_session_manager._session_to_instance.clear()
+        server.mcp_session_manager._instance_to_session.clear()
 
     def test_screenshot_without_file_path_returns_image_content(self):
         async def run():
-            return await server.take_screenshot(instance_id="inst-sc")
+            fn = getattr(server.take_screenshot, "fn", server.take_screenshot)
+            return await fn(instance_id="inst-sc")
 
         result = asyncio.run(run())
         self.assertIsInstance(result, ToolResult)
@@ -470,7 +475,8 @@ class ScreenshotReturnsImageContentTests(unittest.TestCase):
 
         try:
             async def run():
-                return await server.take_screenshot(instance_id="inst-sc", file_path=target_path)
+                fn = getattr(server.take_screenshot, "fn", server.take_screenshot)
+                return await fn(instance_id="inst-sc", file_path=target_path)
 
             result = asyncio.run(run())
             self.assertIsInstance(result, ToolResult)

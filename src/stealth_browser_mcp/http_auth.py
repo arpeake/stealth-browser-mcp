@@ -131,16 +131,19 @@ class BearerTokenVerifier(TokenVerifier):
         self,
         token: Optional[str] = None,
         required_scopes: Optional[List[str]] = None,
+        env_var: Optional[str] = None,
     ):
         """Initialize the verifier.
 
         Args:
             token (Optional[str]): Expected token, or None to read from config dynamically.
             required_scopes (Optional[List[str]]): Required OAuth scopes.
+            env_var (Optional[str]): Environment variable name to read token from if token is None.
         """
         scopes = required_scopes or [HTTP_CONTROL_SCOPE]
         super().__init__(required_scopes=scopes)
         self._token = token
+        self._env_var = env_var
 
     async def verify_token(self, token: str) -> Optional[AccessToken]:
         """Verify an incoming bearer token.
@@ -151,7 +154,12 @@ class BearerTokenVerifier(TokenVerifier):
         Returns:
             Optional[AccessToken]: Token metadata when valid, otherwise None.
         """
-        expected = self._token if self._token is not None else get_mcp_token()
+        expected = self._token
+        if expected is None and self._env_var:
+            expected = os.getenv(self._env_var, "").strip() or None
+        if expected is None:
+            expected = get_mcp_token()
+
         if not expected or not verify_token(token, expected):
             return None
         return AccessToken(
