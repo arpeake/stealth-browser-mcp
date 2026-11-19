@@ -13,11 +13,12 @@ even when a browser is live. The original source browser profile is never touche
 No print() calls exist in this module (stdio MCP transport). ASCII only.
 """
 
+import asyncio
 import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from . import browser_sources
 from . import profiles
@@ -110,13 +111,33 @@ def find_session_profile_dir(session_id: str) -> Tuple[Path, str, Optional[Path]
     return session_path, profile_subdir or "Default", ls_path
 
 
+def close_session_browser(
+    session_id: str,
+    timeout: float = 15.0,
+    browser_manager: Optional[Any] = None,
+) -> Any:
+    """Gracefully close the browser for a session via CDP Browser.close and wait for exit."""
+    from .browser_manager import BrowserManager
+
+    return BrowserManager.find_and_close_session_browser(
+        session_id=session_id,
+        keep=True,
+        timeout=timeout,
+        manager=browser_manager,
+    )
+
+
 def save_to_seed(
     session_id: str,
     seed: Optional[str] = None,
+    close_first: bool = False,
+    flush_wait_seconds: float = 6.0,
     *,
     lock_timeout: float = 10.0,
     max_snapshots: Optional[int] = 5,
     snapshot_label: Optional[str] = "auto-save",
+    browser_already_closed: bool = False,
+    close_browser_fn: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
     """Save a session's profile state into a seed under the per-seed lock.
 
@@ -124,13 +145,21 @@ def save_to_seed(
         session_id: Validated session ID.
         seed: Optional target seed name. If None, saves to the seed the session
             was spawned from.
+        close_first: When True, gracefully closes the session's browser first,
+            then copies the profile, then removes the session directory.
+        flush_wait_seconds: Seconds to wait before copying when close_first is False
+            so localStorage has time to commit. Defaults to 6.0 (0 disables).
         lock_timeout: Seconds to wait for seed locks before reporting busy.
         max_snapshots: Snapshot retention count when taking the automatic pre-save
             snapshot.
         snapshot_label: Optional label for the automatic snapshot.
+        browser_already_closed: Internal flag indicating the browser was already
+            closed asynchronously before calling save_to_seed.
+        close_browser_fn: Optional custom close callable for testing with fakes.
 
     Returns:
         Dict[str, Any] with operation outcome, status, seed, and file counts.
+        Includes a warning string when close_first is False.
 
     Raises:
         SeedBusyError: When locks cannot be acquired within the timeout.
@@ -138,19 +167,14 @@ def save_to_seed(
         ProfileError: When session or seed validation fails.
     """
     profiles.check_session_id(session_id)
-    if not profiles.session_exists(session_id):
-        raise profiles.ProfileError(f"session not found: {session_id}")
 
-    session_data = profiles.load_session(session_id)
-    session_path = profiles.session_dir(session_id)
-    if not session_path.is_dir():
-        raise profiles.ProfileError(f"session directory not found: {session_id}")
-
-    orig_seed = session_data.get("seed")
     if seed is not None and isinstance(seed, str) and seed.strip():
         target_seed = seed.strip()
     else:
-        target_seed = orig_seed
+        if not profiles.session_exists(session_id):
+            raise profiles.ProfileError(f"session not found: {session_id}")
+        session_data = profiles.load_session(session_id)
+        target_seed = session_data.get("seed")
 
     if not target_seed:
         raise profiles.ProfileError(f"no seed specified and session {session_id} has no recorded seed")
@@ -166,6 +190,31 @@ def save_to_seed(
         ) from exc
 
     try:
+        if not profiles.session_exists(session_id):
+            raise profiles.ProfileError(f"session not found: {session_id}")
+
+        session_data = profiles.load_session(session_id)
+        session_path = profiles.session_dir(session_id)
+        if not session_path.is_dir():
+            raise profiles.ProfileError(f"session directory not found: {session_id}")
+
+        if close_first and not browser_already_closed:
+            if close_browser_fn is not None:
+                close_res = close_browser_fn(session_id)
+            else:
+                close_res = close_session_browser(session_id)
+            if asyncio.iscoroutine(close_res):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is None:
+                    asyncio.run(close_res)
+                elif not loop.is_running():
+                    loop.run_until_complete(close_res)
+        elif not close_first and flush_wait_seconds > 0:
+            time.sleep(flush_wait_seconds)
+
         # Step 1: Automatic snapshot if seed already exists
         snapshot_id: Optional[str] = None
         had_existing_seed = profiles.seed_exists(target_seed)
@@ -284,7 +333,14 @@ def save_to_seed(
                     now=now_ts,
                 )
 
-        return {
+        if close_first:
+            try:
+                from . import session_spawn
+                session_spawn.cleanup_session(session_id, keep=False)
+            except Exception:
+                pass
+
+        result = {
             "status": "ok",
             "seed": target_seed,
             "session_id": session_id,
@@ -295,5 +351,11 @@ def save_to_seed(
             "bytes": copy_result.bytes,
             "path": str(dest_path),
         }
+        if not close_first:
+            result["warning"] = (
+                "Cookies written within the last ~30 s may be missing and "
+                "that close_first=True guarantees a complete save."
+            )
+        return result
     finally:
         save_guard.release()

@@ -501,6 +501,84 @@ class SeedSaveUnitTests(_TempDataDir):
             self.assertEqual(res2["status"], "ok")
             self.assertEqual(res2["session_id"], "tool_sess")
 
+    def test_save_to_seed_close_first_calls_close_before_copy(self):
+        """Unit test with fake verifying close_first calls close before copy, and cleans session dir."""
+        self._create_sample_seed("seed_cf")
+        self._create_sample_session("sess_cf", seed="seed_cf")
+
+        events = []
+
+        def fake_close(sess_id):
+            events.append(("close", sess_id))
+
+        original_copy_seed = seed_save.sc.copy_seed
+
+        def tracked_copy_seed(*args, **kwargs):
+            events.append(("copy", args[1]))
+            return original_copy_seed(*args, **kwargs)
+
+        with mock.patch.object(seed_save, "close_session_browser", side_effect=fake_close), \
+             mock.patch.object(seed_save.sc, "copy_seed", side_effect=tracked_copy_seed):
+            res = seed_save.save_to_seed("sess_cf", close_first=True)
+
+        self.assertEqual(res["status"], "ok")
+        self.assertNotIn("warning", res)
+        event_names = [e[0] for e in events]
+        self.assertIn("close", event_names)
+        self.assertIn("copy", event_names)
+        self.assertLess(event_names.index("close"), event_names.index("copy"))
+        self.assertEqual(events[0], ("close", "sess_cf"))
+        self.assertFalse(profiles.session_exists("sess_cf"))
+
+    def test_save_to_seed_flush_wait_and_warning_when_not_close_first(self):
+        """Unit test verifying flush wait is used (patched) and warning string is present."""
+        self._create_sample_seed("seed_fw")
+        self._create_sample_session("sess_fw", seed="seed_fw")
+
+        # 1. Default flush_wait_seconds=6.0
+        with mock.patch("time.sleep") as mock_sleep:
+            res = seed_save.save_to_seed("sess_fw", close_first=False)
+            mock_sleep.assert_called_once_with(6.0)
+
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("warning", res)
+        self.assertIn("cookies written within the last ~30 s may be missing", res["warning"].lower())
+        self.assertIn("close_first=true guarantees a complete save", res["warning"].lower())
+        self.assertTrue(profiles.session_exists("sess_fw"))
+
+        # 2. Configurable flush_wait_seconds (e.g. 2.0)
+        with mock.patch("time.sleep") as mock_sleep:
+            res2 = seed_save.save_to_seed("sess_fw", close_first=False, flush_wait_seconds=2.0)
+            mock_sleep.assert_called_once_with(2.0)
+        self.assertIn("warning", res2)
+
+        # 3. flush_wait_seconds=0 disables wait
+        with mock.patch("time.sleep") as mock_sleep:
+            res3 = seed_save.save_to_seed("sess_fw", close_first=False, flush_wait_seconds=0)
+            mock_sleep.assert_not_called()
+        self.assertIn("warning", res3)
+
+    def test_mcp_tool_save_to_seed_close_first_and_flush_wait(self):
+        """Test server.save_to_seed tool handles close_first and flush_wait."""
+        self._create_sample_seed("tool_seed3")
+        self._create_sample_session("tool_sess3", seed="tool_seed3")
+
+        # Default close_first=False calls time.sleep and returns warning
+        with mock.patch("time.sleep") as mock_sleep:
+            res = asyncio.run(server.save_to_seed.fn("tool_sess3"))
+            mock_sleep.assert_called_once_with(6.0)
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("warning", res)
+
+        # close_first=True calls fake close and does not return warning
+        with mock.patch.object(seed_save, "close_session_browser") as mock_close, \
+             mock.patch("time.sleep") as mock_sleep:
+            res2 = asyncio.run(server.save_to_seed.fn("tool_sess3", close_first=True))
+            mock_sleep.assert_not_called()
+            mock_close.assert_called_once()
+        self.assertEqual(res2["status"], "ok")
+        self.assertNotIn("warning", res2)
+
 
 @unittest.skipUnless(
     RUN_BROWSER_TESTS,
@@ -632,7 +710,7 @@ class TestSaveToSeedGatedRealBrowser(_TempDataDir):
                     self.assertEqual(state1_after_login, "logged_in")
 
                     # Step 5: Save session 1 state back to seed
-                    save_res = await server.save_to_seed.fn(s1_session_id)
+                    save_res = await server.save_to_seed.fn(s1_session_id, close_first=True)
                     self.assertEqual(save_res["status"], "ok")
                     self.assertEqual(save_res["seed"], seed_name)
                     self.assertGreater(save_res["copied_count"], 0)

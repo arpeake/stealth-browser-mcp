@@ -651,6 +651,8 @@ async def restore_seed_snapshot(
 async def save_to_seed(
     session_id: str,
     seed: Optional[str] = None,
+    close_first: bool = False,
+    flush_wait_seconds: float = 6.0,
 ) -> Dict[str, Any]:
     """
     Save a running session's profile state back into its seed (or a new seed name).
@@ -664,6 +666,12 @@ async def save_to_seed(
         session_id (str): ID of the session (or browser instance ID) to save from.
         seed (Optional[str]): Target seed name (1-40 chars, [a-z0-9_-]). Defaults
             to the seed the session was spawned from.
+        close_first (bool): Gracefully close the session's browser before saving
+            to guarantee all in-memory buffers (cookies and local storage) are
+            committed to disk. Defaults to False.
+        flush_wait_seconds (float): Seconds to wait before saving when close_first
+            is False so localStorage has time to commit. Defaults to 6.0. Set to
+            0 to disable.
 
     Returns:
         Dict[str, Any]: Operation summary with status, seed name, and file counts.
@@ -672,7 +680,27 @@ async def save_to_seed(
         session_info = await browser_manager.get_session_info(session_id)
         if session_info and session_info.get("session_id"):
             session_id = session_info["session_id"]
-    return seed_save.save_to_seed(session_id=session_id, seed=seed)
+    if close_first:
+        close_res = seed_save.close_session_browser(
+            session_id=session_id,
+            timeout=15.0,
+            browser_manager=browser_manager,
+        )
+        if asyncio.iscoroutine(close_res):
+            await close_res
+        return seed_save.save_to_seed(
+            session_id=session_id,
+            seed=seed,
+            close_first=close_first,
+            flush_wait_seconds=flush_wait_seconds,
+            browser_already_closed=True,
+        )
+    return seed_save.save_to_seed(
+        session_id=session_id,
+        seed=seed,
+        close_first=close_first,
+        flush_wait_seconds=flush_wait_seconds,
+    )
 
 @section_tool("element-interaction")
 async def query_elements(

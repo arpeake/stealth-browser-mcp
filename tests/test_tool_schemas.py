@@ -92,9 +92,13 @@ class NullDefaultSchemaTests(unittest.TestCase):
         props = tool.inputSchema["properties"]
         self.assertIn("session_id", props)
         self.assertIn("seed", props)
+        self.assertIn("close_first", props)
+        self.assertIn("flush_wait_seconds", props)
         required = tool.inputSchema.get("required", [])
         self.assertIn("session_id", required)
         self.assertNotIn("seed", required)
+        self.assertNotIn("close_first", required)
+        self.assertNotIn("flush_wait_seconds", required)
 
 
 if __name__ == "__main__":
