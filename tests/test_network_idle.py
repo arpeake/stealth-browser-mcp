@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -71,18 +72,25 @@ class FakeBrowser:
         return self.main_tab
 
 
+class FakeInstance(SimpleNamespace):
+    """Fake browser instance for testing."""
+
+    def update_activity(self):
+        self.last_activity = datetime.now()
+
+
 def create_manager_with_tab(tab, instance_id="test-inst"):
     manager = BrowserManager()
     browser = FakeBrowser(tab)
     manager._instances[instance_id] = {
         "browser": browser,
         "tab": tab,
-        "instance": SimpleNamespace(
+        "instance": FakeInstance(
             instance_id=instance_id,
             state="ready",
             current_url=tab.url,
             title="Test",
-            last_activity=None,
+            last_activity=datetime.now(),
         ),
         "options": BrowserOptions(),
         "navigation_count": 0,
