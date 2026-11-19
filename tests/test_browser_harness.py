@@ -2,16 +2,35 @@
 
 import asyncio
 import os
+import shutil
 import tempfile
 import time
 import unittest
 import urllib.parse
 import urllib.request
-from typing import Optional
+from typing import Any, Optional
 
 from tests.browser_harness.server import PAGES_DIR, FixtureServer
 
 RUN_BROWSER_TESTS = os.getenv("STEALTH_BROWSER_TESTS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _safe_cleanup_dir(dir_path: Optional[str]) -> None:
+    """Safely remove a temporary directory with retry and ignore_errors fallback."""
+    if not dir_path or not os.path.exists(dir_path):
+        return
+    for attempt in range(10):
+        try:
+            shutil.rmtree(dir_path, ignore_errors=False)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.1)
+    try:
+        shutil.rmtree(dir_path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 class TestFixtureServerUngated(unittest.TestCase):
@@ -130,6 +149,7 @@ class TestBrowserHarnessGated(unittest.TestCase):
             merge_browser_args,
             sandbox_must_be_disabled,
         )
+        from stealth_browser_mcp.process_cleanup import process_cleanup
 
         executable = os.environ.get("STEALTH_BROWSER_EXECUTABLE", "").strip()
         if not executable or not os.path.exists(executable):
@@ -140,8 +160,10 @@ class TestBrowserHarnessGated(unittest.TestCase):
 
         async def run_test() -> None:
             start_time = time.monotonic()
-            with FixtureServer() as server:
-                with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir = tempfile.mkdtemp(prefix="stealth_harness_launch_")
+            browser: Optional[Any] = None
+            try:
+                with FixtureServer() as server:
                     config = uc.Config(
                         headless=True,
                         user_data_dir=temp_dir,
@@ -150,26 +172,59 @@ class TestBrowserHarnessGated(unittest.TestCase):
                         sandbox=False if sandbox_must_be_disabled() else True,
                     )
                     browser = await launch_browser(config, timeout=30.0)
-                    try:
-                        tab = await browser.get(server.url_for("inputs.html"))
-                        title = await tab.evaluate("document.title")
-                        self.assertEqual(title, "Inputs Fixture")
+                    tab = await browser.get(server.url_for("inputs.html"))
+                    title = await tab.evaluate("document.title")
+                    self.assertEqual(title, "Inputs Fixture")
 
-                        placeholder = await tab.evaluate(
-                            "document.getElementById('text-input').getAttribute('placeholder')"
-                        )
-                        self.assertEqual(placeholder, "Type text here")
-                    finally:
+                    placeholder = await tab.evaluate(
+                        "document.getElementById('text-input').getAttribute('placeholder')"
+                    )
+                    self.assertEqual(placeholder, "Type text here")
+            finally:
+                if browser is not None:
+                    # 1. Close browser via CDP
+                    try:
+                        if getattr(browser, "connection", None) is not None:
+                            await asyncio.wait_for(
+                                browser.connection.send(uc.cdp.browser.close()),
+                                timeout=3.0,
+                            )
+                    except Exception:
+                        pass
+                    # 2. Terminate main process
+                    if getattr(browser, "_process", None) is not None:
                         try:
-                            if getattr(browser, "connection", None) is not None:
-                                await asyncio.wait_for(
-                                    browser.connection.send(uc.cdp.browser.close()),
-                                    timeout=3.0,
-                                )
+                            await _stop_process(browser._process)
                         except Exception:
                             pass
-                        if getattr(browser, "_process", None) is not None:
-                            await _stop_process(browser._process)
+                    # 3. Disconnect open target handlers
+                    connections = [
+                        getattr(tab, "disconnect", None)
+                        for tab in list(getattr(browser, "targets", []) or [])
+                    ]
+                    if getattr(browser, "connection", None) is not None:
+                        connections.append(getattr(browser.connection, "disconnect", None))
+                    disconnects = [d() for d in connections if d is not None]
+                    if disconnects:
+                        try:
+                            await asyncio.wait(
+                                [asyncio.ensure_future(item) for item in disconnects],
+                                timeout=2.0,
+                            )
+                        except Exception:
+                            pass
+                    browser._process = None
+                    browser._process_pid = None
+
+                # 4. Clean up any lingering processes referencing temp profile
+                try:
+                    for pid in process_cleanup._get_browser_pids_for_profile(temp_dir):
+                        process_cleanup._kill_process_by_pid(pid, "test_harness")
+                except Exception:
+                    pass
+
+                # 5. Remove temp profile directory with retrying cleanup
+                _safe_cleanup_dir(temp_dir)
 
             elapsed = time.monotonic() - start_time
             self.assertLess(elapsed, 60.0, f"Gated launch exceeded 60 seconds ({elapsed:.2f}s)")
@@ -181,63 +236,79 @@ class TestBrowserHarnessGated(unittest.TestCase):
         from stealth_browser_mcp.browser_manager import BrowserManager
         from stealth_browser_mcp.models import BrowserOptions
         from stealth_browser_mcp.platform_utils import sandbox_must_be_disabled
+        from stealth_browser_mcp.process_cleanup import process_cleanup
 
         async def run_test() -> None:
             start_time = time.monotonic()
-            with FixtureServer() as server:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    manager = BrowserManager()
+            temp_dir = tempfile.mkdtemp(prefix="stealth_harness_login_")
+            manager = BrowserManager()
+            instance = None
+            try:
+                with FixtureServer() as server:
                     options = BrowserOptions(
                         headless=True,
                         user_data_dir=temp_dir,
                         sandbox=False if sandbox_must_be_disabled() else True,
                     )
                     instance = await manager.spawn_browser(options)
+                    nav_result = await manager.navigate(
+                        instance.instance_id,
+                        server.url_for("login.html"),
+                        wait_until="load",
+                        timeout=15000,
+                    )
+                    self.assertTrue(nav_result.get("success"))
+
+                    tab = await manager.get_navigation_tab(instance.instance_id)
+
+                    status_before = await tab.evaluate(
+                        "document.getElementById('auth-state').textContent"
+                    )
+                    self.assertEqual(status_before, "logged_out")
+
+                    await tab.evaluate("document.getElementById('login-button').click()")
+                    await asyncio.sleep(0.1)
+
+                    status_after = await tab.evaluate(
+                        "document.getElementById('auth-state').textContent"
+                    )
+                    self.assertEqual(status_after, "logged_in")
+
+                    cookie_text = await tab.evaluate("document.cookie")
+                    self.assertIn("session_token=secret_fixture_cookie_12345", cookie_text)
+
+                    storage_token = await tab.evaluate(
+                        "localStorage.getItem('session_token')"
+                    )
+                    self.assertEqual(storage_token, "secret_fixture_cookie_12345")
+
+                    storage_user = await tab.evaluate(
+                        "localStorage.getItem('auth_user')"
+                    )
+                    self.assertEqual(storage_user, "testadmin")
+
+                    await tab.evaluate("document.getElementById('logout-button').click()")
+                    await asyncio.sleep(0.1)
+                    status_logged_out = await tab.evaluate(
+                        "document.getElementById('auth-state').textContent"
+                    )
+                    self.assertEqual(status_logged_out, "logged_out")
+            finally:
+                if instance is not None:
                     try:
-                        nav_result = await manager.navigate(
-                            instance.instance_id,
-                            server.url_for("login.html"),
-                            wait_until="load",
-                            timeout=15000,
-                        )
-                        self.assertTrue(nav_result.get("success"))
-
-                        tab = await manager.get_navigation_tab(instance.instance_id)
-
-                        status_before = await tab.evaluate(
-                            "document.getElementById('auth-state').textContent"
-                        )
-                        self.assertEqual(status_before, "logged_out")
-
-                        await tab.evaluate("document.getElementById('login-button').click()")
-                        await asyncio.sleep(0.1)
-
-                        status_after = await tab.evaluate(
-                            "document.getElementById('auth-state').textContent"
-                        )
-                        self.assertEqual(status_after, "logged_in")
-
-                        cookie_text = await tab.evaluate("document.cookie")
-                        self.assertIn("session_token=secret_fixture_cookie_12345", cookie_text)
-
-                        storage_token = await tab.evaluate(
-                            "localStorage.getItem('session_token')"
-                        )
-                        self.assertEqual(storage_token, "secret_fixture_cookie_12345")
-
-                        storage_user = await tab.evaluate(
-                            "localStorage.getItem('auth_user')"
-                        )
-                        self.assertEqual(storage_user, "testadmin")
-
-                        await tab.evaluate("document.getElementById('logout-button').click()")
-                        await asyncio.sleep(0.1)
-                        status_logged_out = await tab.evaluate(
-                            "document.getElementById('auth-state').textContent"
-                        )
-                        self.assertEqual(status_logged_out, "logged_out")
-                    finally:
-                        await manager.close_browser(instance.instance_id)
+                        await manager.close_instance(instance.instance_id)
+                    except Exception:
+                        pass
+                try:
+                    await manager.close_all()
+                except Exception:
+                    pass
+                try:
+                    for pid in process_cleanup._get_browser_pids_for_profile(temp_dir):
+                        process_cleanup._kill_process_by_pid(pid, "test_harness")
+                except Exception:
+                    pass
+                _safe_cleanup_dir(temp_dir)
 
             elapsed = time.monotonic() - start_time
             self.assertLess(elapsed, 60.0, f"Login test exceeded 60 seconds ({elapsed:.2f}s)")
@@ -249,56 +320,72 @@ class TestBrowserHarnessGated(unittest.TestCase):
         from stealth_browser_mcp.browser_manager import BrowserManager
         from stealth_browser_mcp.models import BrowserOptions
         from stealth_browser_mcp.platform_utils import sandbox_must_be_disabled
+        from stealth_browser_mcp.process_cleanup import process_cleanup
 
         async def run_test() -> None:
             start_time = time.monotonic()
-            with FixtureServer() as server:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    manager = BrowserManager()
+            temp_dir = tempfile.mkdtemp(prefix="stealth_harness_react_")
+            manager = BrowserManager()
+            instance = None
+            try:
+                with FixtureServer() as server:
                     options = BrowserOptions(
                         headless=True,
                         user_data_dir=temp_dir,
                         sandbox=False if sandbox_must_be_disabled() else True,
                     )
                     instance = await manager.spawn_browser(options)
+                    await manager.navigate(
+                        instance.instance_id,
+                        server.url_for("react_controlled.html"),
+                        wait_until="load",
+                        timeout=15000,
+                    )
+                    tab = await manager.get_navigation_tab(instance.instance_id)
+
+                    initial_state = await tab.evaluate(
+                        "document.getElementById('tracked-state').textContent"
+                    )
+                    self.assertEqual(initial_state, "initial")
+
+                    # Attempt direct programmatic assignment: should be rejected/reverted
+                    await tab.evaluate(
+                        "document.getElementById('controlled-input').value = 'injected'"
+                    )
+                    reverted_val = await tab.evaluate(
+                        "document.getElementById('controlled-input').value"
+                    )
+                    self.assertEqual(reverted_val, "initial")
+
+                    # Now use native descriptor setter + dispatch input event (React setter strategy)
+                    await tab.evaluate(
+                        "(function() {"
+                        "  const input = document.getElementById('controlled-input');"
+                        "  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'updated_value');"
+                        "  input.dispatchEvent(new Event('input', { bubbles: true }));"
+                        "})()"
+                    )
+                    await asyncio.sleep(0.1)
+                    updated_state = await tab.evaluate(
+                        "document.getElementById('tracked-state').textContent"
+                    )
+                    self.assertEqual(updated_state, "updated_value")
+            finally:
+                if instance is not None:
                     try:
-                        await manager.navigate(
-                            instance.instance_id,
-                            server.url_for("react_controlled.html"),
-                            wait_until="load",
-                            timeout=15000,
-                        )
-                        tab = await manager.get_navigation_tab(instance.instance_id)
-
-                        initial_state = await tab.evaluate(
-                            "document.getElementById('tracked-state').textContent"
-                        )
-                        self.assertEqual(initial_state, "initial")
-
-                        # Attempt direct programmatic assignment: should be rejected/reverted
-                        await tab.evaluate(
-                            "document.getElementById('controlled-input').value = 'injected'"
-                        )
-                        reverted_val = await tab.evaluate(
-                            "document.getElementById('controlled-input').value"
-                        )
-                        self.assertEqual(reverted_val, "initial")
-
-                        # Now use native descriptor setter + dispatch input event (React setter strategy)
-                        await tab.evaluate(
-                            "(function() {"
-                            "  const input = document.getElementById('controlled-input');"
-                            "  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'updated_value');"
-                            "  input.dispatchEvent(new Event('input', { bubbles: true }));"
-                            "})()"
-                        )
-                        await asyncio.sleep(0.1)
-                        updated_state = await tab.evaluate(
-                            "document.getElementById('tracked-state').textContent"
-                        )
-                        self.assertEqual(updated_state, "updated_value")
-                    finally:
-                        await manager.close_browser(instance.instance_id)
+                        await manager.close_instance(instance.instance_id)
+                    except Exception:
+                        pass
+                try:
+                    await manager.close_all()
+                except Exception:
+                    pass
+                try:
+                    for pid in process_cleanup._get_browser_pids_for_profile(temp_dir):
+                        process_cleanup._kill_process_by_pid(pid, "test_harness")
+                except Exception:
+                    pass
+                _safe_cleanup_dir(temp_dir)
 
             elapsed = time.monotonic() - start_time
             self.assertLess(elapsed, 60.0, f"React controlled test exceeded 60 seconds ({elapsed:.2f}s)")
