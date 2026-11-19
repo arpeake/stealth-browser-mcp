@@ -733,16 +733,26 @@ class FrameContext:
     is_cross_origin: bool
 
 
+def _tab_cache_id(tab: Any) -> Any:
+    """Get a stable cache key for a tab, using CDP target_id when available."""
+    target = getattr(tab, "target", None)
+    target_id = getattr(target, "target_id", None) if target else None
+    if target_id is not None:
+        return str(target_id)
+    return id(tab)
+
+
 _node_contexts: Dict[int, Optional[int]] = {}
 _node_tabs: Dict[int, Tab] = {}
-_frame_contexts: Dict[Tuple[int, str], FrameContext] = {}
+_frame_contexts: Dict[Tuple[Any, str], FrameContext] = {}
 MAX_TRACKED_NODES = 128
 
 
 def _track_node(backend_node_id: int, context_id: Optional[int], target_tab: Optional[Tab] = None) -> None:
     """Record execution context and target tab for a backend node id."""
-    _node_contexts[backend_node_id] = context_id
-    if target_tab is not None:
+    if context_id is not None:
+        _node_contexts[backend_node_id] = context_id
+    if target_tab is not None and not getattr(target_tab, "closed", False):
         _node_tabs[backend_node_id] = target_tab
     while len(_node_contexts) > MAX_TRACKED_NODES:
         _node_contexts.pop(next(iter(_node_contexts)), None)
@@ -815,10 +825,10 @@ async def resolve_frame_context(tab: Tab, frame: str) -> Optional[FrameContext]:
     Returns:
         Optional[FrameContext]: Resolved frame context, or None when not found.
     """
-    cache_key = (id(tab), frame)
+    cache_key = (_tab_cache_id(tab), frame)
     if cache_key in _frame_contexts:
         cached = _frame_contexts[cache_key]
-        if cached.target_tab and not getattr(cached.target_tab, "closed", False):
+        if cached.target_tab and not getattr(cached.target_tab, "closed", False) and not getattr(tab, "closed", False):
             return cached
 
     frame_id: Optional[str] = None
@@ -978,7 +988,7 @@ async def resolve_cross_origin_node(
                 pass
             if node and hasattr(node, "backend_node_id"):
                 bid = int(node.backend_node_id)
-                _track_node(bid, frame_ctx.context_id, frame_ctx.target_tab)
+                _track_node(bid, frame_ctx.context_id, frame_ctx.target_tab if frame_ctx.target_tab is not tab else None)
                 return bid
     except Exception:
         pass
@@ -1104,10 +1114,19 @@ async def call_on_node(tab: Tab, backend_node_id: int, function: str, *args: Any
         Any: Returned value, by value.
     """
     target_tab = _node_tabs.get(backend_node_id, tab)
+    if getattr(target_tab, "closed", False):
+        target_tab = tab
+    if hasattr(tab, "browser") and tab.browser and hasattr(target_tab, "browser") and target_tab.browser and target_tab.browser is not tab.browser:
+        target_tab = tab
+    if hasattr(tab, "browser") and tab.browser and not getattr(target_tab, "browser", None):
+        target_tab = tab
+
     resolve_kwargs: Dict[str, Any] = {
         "backend_node_id": cdp.dom.BackendNodeId(backend_node_id)
     }
     ctx_id = _node_contexts.get(backend_node_id)
+    if getattr(target_tab, "closed", False) or (target_tab is not tab and target_tab is not _node_tabs.get(backend_node_id)):
+        ctx_id = None
     if ctx_id is not None and target_tab is tab:
         resolve_kwargs["execution_context_id"] = cdp.runtime.ExecutionContextId(int(ctx_id))
 
@@ -1148,6 +1167,13 @@ async def node_center(tab: Tab, backend_node_id: int) -> Optional[Tuple[float, f
         Optional[Tuple[float, float]]: (x, y), or None when the node has no layout box.
     """
     target_tab = _node_tabs.get(backend_node_id, tab)
+    if getattr(target_tab, "closed", False):
+        target_tab = tab
+    if hasattr(tab, "browser") and tab.browser and hasattr(target_tab, "browser") and target_tab.browser and target_tab.browser is not tab.browser:
+        target_tab = tab
+    if hasattr(tab, "browser") and tab.browser and not getattr(target_tab, "browser", None):
+        target_tab = tab
+
     quads = None
     try:
         quads = await target_tab.send(cdp.dom.get_content_quads(backend_node_id=cdp.dom.BackendNodeId(backend_node_id)))
@@ -1176,6 +1202,13 @@ async def scroll_into_view(tab: Tab, backend_node_id: int) -> Optional[Tuple[flo
         Optional[Tuple[float, float]]: Settled center point, or None when the node has no layout box.
     """
     target_tab = _node_tabs.get(backend_node_id, tab)
+    if getattr(target_tab, "closed", False):
+        target_tab = tab
+    if hasattr(tab, "browser") and tab.browser and hasattr(target_tab, "browser") and target_tab.browser and target_tab.browser is not tab.browser:
+        target_tab = tab
+    if hasattr(tab, "browser") and tab.browser and not getattr(target_tab, "browser", None):
+        target_tab = tab
+
     try:
         await target_tab.send(cdp.dom.scroll_into_view_if_needed(backend_node_id=cdp.dom.BackendNodeId(backend_node_id)))
     except Exception:
@@ -1204,7 +1237,8 @@ async def move_mouse(tab: Tab, x: float, y: float) -> None:
         x (float): Target x in viewport CSS pixels.
         y (float): Target y in viewport CSS pixels.
     """
-    start_x, start_y = _last_mouse_positions.get(id(tab), (x + random.uniform(-120, 120), y + random.uniform(-80, 80)))
+    tab_key = _tab_cache_id(tab)
+    start_x, start_y = _last_mouse_positions.get(tab_key, (x + random.uniform(-120, 120), y + random.uniform(-80, 80)))
     for step in range(1, MOUSE_MOVE_STEPS + 1):
         progress = step / MOUSE_MOVE_STEPS
         eased = progress * progress * (3 - 2 * progress)
@@ -1214,8 +1248,8 @@ async def move_mouse(tab: Tab, x: float, y: float) -> None:
             x=start_x + (x - start_x) * eased + jitter,
             y=start_y + (y - start_y) * eased + jitter,
         ))
-    _last_mouse_positions.pop(id(tab), None)
-    _last_mouse_positions[id(tab)] = (x, y)
+    _last_mouse_positions.pop(tab_key, None)
+    _last_mouse_positions[tab_key] = (x, y)
     while len(_last_mouse_positions) > MAX_TRACKED_TABS:
         _last_mouse_positions.pop(next(iter(_last_mouse_positions)))
 

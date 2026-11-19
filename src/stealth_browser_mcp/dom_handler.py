@@ -601,14 +601,19 @@ class DOMHandler:
                     xpath_expr=xpath_expr,
                 )
                 try:
-                    kwargs: Dict[str, Any] = {
-                        "expression": focus_expr,
-                        "return_by_value": True,
-                        "await_promise": True,
-                    }
                     if eval_context_id is not None:
-                        kwargs["context_id"] = cdp.runtime.ExecutionContextId(eval_context_id)
-                    await eval_tab.send(cdp.runtime.evaluate(**kwargs))
+                        await eval_tab.send(cdp.runtime.evaluate(
+                            expression=focus_expr,
+                            context_id=cdp.runtime.ExecutionContextId(eval_context_id),
+                            return_by_value=True,
+                            await_promise=True,
+                        ))
+                    else:
+                        await eval_tab.send(cdp.runtime.evaluate(
+                            expression=focus_expr,
+                            return_by_value=True,
+                            await_promise=True,
+                        ))
                 except Exception:
                     pass
                 for char in filter_text:
@@ -632,21 +637,27 @@ class DOMHandler:
 
             while time.monotonic() < deadline:
                 try:
-                    kwargs = {
-                        "expression": find_expression,
-                        "return_by_value": False,
-                        "await_promise": True,
-                    }
                     if eval_context_id is not None:
-                        kwargs["context_id"] = cdp.runtime.ExecutionContextId(eval_context_id)
-                    eval_result = await eval_tab.send(cdp.runtime.evaluate(**kwargs))
+                        eval_result = await eval_tab.send(cdp.runtime.evaluate(
+                            expression=find_expression,
+                            context_id=cdp.runtime.ExecutionContextId(eval_context_id),
+                            return_by_value=False,
+                            await_promise=True,
+                        ))
+                    else:
+                        eval_result = await eval_tab.send(cdp.runtime.evaluate(
+                            expression=find_expression,
+                            return_by_value=False,
+                            await_promise=True,
+                        ))
                     remote_obj = eval_result[0] if isinstance(eval_result, tuple) else eval_result
                     if remote_obj and getattr(remote_obj, "object_id", None):
                         obj_id = cdp.runtime.RemoteObjectId(remote_obj.object_id)
                         node = await eval_tab.send(cdp.dom.describe_node(object_id=obj_id))
                         if node and hasattr(node, "backend_node_id"):
                             option_backend_node_id = int(node.backend_node_id)
-                            input_actions._track_node(option_backend_node_id, eval_context_id, eval_tab)
+                            if eval_context_id is not None or eval_tab is not tab:
+                                input_actions._track_node(option_backend_node_id, eval_context_id, eval_tab)
                             try:
                                 call_res = await eval_tab.send(cdp.runtime.call_function_on(
                                     "function () { return this.id || null; }",
@@ -689,14 +700,19 @@ class DOMHandler:
 
             while time.monotonic() < verify_deadline:
                 try:
-                    kwargs = {
-                        "expression": verify_expression,
-                        "return_by_value": True,
-                        "await_promise": True,
-                    }
                     if eval_context_id is not None:
-                        kwargs["context_id"] = cdp.runtime.ExecutionContextId(eval_context_id)
-                    verify_res = await eval_tab.send(cdp.runtime.evaluate(**kwargs))
+                        verify_res = await eval_tab.send(cdp.runtime.evaluate(
+                            expression=verify_expression,
+                            context_id=cdp.runtime.ExecutionContextId(eval_context_id),
+                            return_by_value=True,
+                            await_promise=True,
+                        ))
+                    else:
+                        verify_res = await eval_tab.send(cdp.runtime.evaluate(
+                            expression=verify_expression,
+                            return_by_value=True,
+                            await_promise=True,
+                        ))
                     remote_obj = verify_res[0] if isinstance(verify_res, tuple) else verify_res
                     val = getattr(remote_obj, "value", None)
                     if isinstance(val, dict) and val.get("verified"):
@@ -710,21 +726,6 @@ class DOMHandler:
                 except Exception:
                     pass
                 await asyncio.sleep(0.1)
-
-            if not verified:
-                raise Exception(
-                    f"Option '{option_text}' was clicked but selection could not be verified on: {selector}"
-                )
-
-            return {
-                "success": True,
-                "selected": option_text,
-                "option": option_text,
-                "verification": verification_info.get("reason", "verified"),
-            }
-
-        except Exception as e:
-            raise Exception(f"Failed to choose option: {str(e)}")
 
             if not verified:
                 raise Exception(
