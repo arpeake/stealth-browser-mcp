@@ -45,6 +45,7 @@ async def fill_os_paste(
     timeout: float = 0.0,
     frame: Optional[str] = None,
     instance_id: Optional[str] = None,
+    backend: Optional[Any] = None,
     **kwargs: Any,
 ) -> bool:
     """Fill an element using real OS clipboard paste under machine-wide lock.
@@ -61,6 +62,7 @@ async def fill_os_paste(
         timeout: Timeout in seconds for finding the element if selector is given.
         frame: Optional iframe selector, name, or id.
         instance_id: Optional browser instance ID for ref resolution.
+        backend: Optional clipboard backend to use instead of the platform default.
         **kwargs: Additional keyword arguments.
 
     Returns:
@@ -72,7 +74,7 @@ async def fill_os_paste(
     await input_actions.focus_node(tab, node_id)
 
     key_desc = resolve_key_descriptor("v")
-    with clipboard_paste_session(text):
+    with clipboard_paste_session(text, backend=backend):
         await tab.send(
             cdp.input_.dispatch_key_event(
                 "rawKeyDown",

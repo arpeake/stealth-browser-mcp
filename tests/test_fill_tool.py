@@ -544,6 +544,17 @@ class UnsupportedKindsAndExplicitStrategyTests(unittest.TestCase):
 class PasteModePlumbingTests(unittest.TestCase):
     """Tests for paste_text(mode=) plumbing in dom_handler and server."""
 
+    def setUp(self):
+        self._env = os.environ.copy()
+        self._tmp = tempfile.TemporaryDirectory()
+        from stealth_browser_mcp.paths import DATA_DIR_ENV
+        os.environ[DATA_DIR_ENV] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+        self._tmp.cleanup()
+
     def test_paste_mode_default_keeps_current_behaviour(self):
         tab = FakeFillTab(backend_node_id=42)
         success = asyncio.run(dom_handler.DOMHandler.paste_text(tab, "#target", "pasted text"))
