@@ -28,6 +28,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import List
 
@@ -132,10 +133,45 @@ def _copy_sqlite_file(src, dst):
     src_uri = "file:{}?mode=ro".format(_uri_quote(src))
     dest_con = None
     src_con = None
+    timeout = max(0.0, float(SQLITE_TIMEOUT))
     try:
-        dest_con = sqlite3.connect(dst)
-        src_con = _SQLITE_SRC_OPENER(src_uri, check_same_thread=False)
-        src_con.backup(dest_con)
+        dest_con = sqlite3.connect(dst, timeout=timeout)
+        try:
+            src_con = _SQLITE_SRC_OPENER(src_uri, check_same_thread=False, timeout=timeout)
+        except TypeError:
+            src_con = _SQLITE_SRC_OPENER(src_uri, check_same_thread=False)
+
+        cursor = src_con.cursor()
+        try:
+            cursor.execute("PRAGMA schema_version")
+            cursor.fetchone()
+        finally:
+            cursor.close()
+
+        start_time = time.monotonic()
+        last_progress_time = start_time
+        last_remaining = None
+
+        def _backup_progress(status, remaining, total):
+            nonlocal last_progress_time, last_remaining
+            now = time.monotonic()
+            if status in (5, 6):  # SQLITE_BUSY (5), SQLITE_LOCKED (6)
+                if timeout <= 0.0 or (now - last_progress_time) >= timeout:
+                    raise sqlite3.OperationalError("database is locked")
+                return
+
+            if last_remaining is None or remaining < last_remaining:
+                last_remaining = remaining
+                last_progress_time = now
+            elif timeout <= 0.0:
+                if remaining > 0 and (last_remaining is not None and remaining == last_remaining):
+                    raise sqlite3.OperationalError("database is locked")
+            elif (now - last_progress_time) >= timeout:
+                if remaining > 0:
+                    raise sqlite3.OperationalError("database is locked")
+
+        sleep_interval = min(0.05, max(0.005, timeout)) if timeout > 0 else 0.01
+        src_con.backup(dest_con, pages=-1, progress=_backup_progress, sleep=sleep_interval)
     except Exception:
         if os.path.exists(dst):
             try:
