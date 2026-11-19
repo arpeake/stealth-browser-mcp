@@ -113,7 +113,7 @@ def redact_url(
                 else:
                     new_pairs.append((k, v))
             if changed:
-                new_query = urlencode(new_pairs)
+                new_query = urlencode(new_pairs, safe="[]")
                 url = urlunparse((
                     parsed.scheme,
                     parsed.netloc,
