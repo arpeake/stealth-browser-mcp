@@ -224,11 +224,29 @@ class A11yTreeParsingAndRefTests(unittest.TestCase):
         self.assertTrue(is_interactive_node({"role": "checkbox"}))
         self.assertTrue(is_interactive_node({"role": "combobox"}))
         self.assertTrue(is_interactive_node({"role": "generic", "properties": {"focusable": True}}))
+        self.assertTrue(
+            is_interactive_node(
+                {"role": "generic", "properties": [{"name": "focusable", "value": {"value": True}}]}
+            )
+        )
+        self.assertTrue(
+            is_interactive_node(
+                {"role": "generic", "properties": [{"name": "focusable", "value": True}]}
+            )
+        )
 
         self.assertFalse(is_interactive_node({"role": "RootWebArea"}))
         self.assertFalse(is_interactive_node({"role": "heading"}))
         self.assertFalse(is_interactive_node({"role": "text"}))
         self.assertFalse(is_interactive_node({"role": "generic"}))
+        self.assertFalse(
+            is_interactive_node({"role": "generic", "properties": {"focusable": False}})
+        )
+        self.assertFalse(
+            is_interactive_node(
+                {"role": "generic", "properties": [{"name": "focusable", "value": {"value": False}}]}
+            )
+        )
 
     def test_build_a11y_tree_assigns_short_refs_to_interactive_nodes(self):
         nodes = [

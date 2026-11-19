@@ -44,7 +44,6 @@ NON_INTERACTIVE_ROLES: Set[str] = {
     "root",
     "none",
     "presentation",
-    "generic",
     "inlinetextbox",
 }
 
@@ -203,19 +202,81 @@ def extract_ref_id(selector: str) -> str:
     return s.strip("'\"")
 
 
-def is_interactive_node(node: Dict[str, Any]) -> bool:
+def _extract_prop_name(name_obj: Any) -> str:
+    """Extract property name string from an AXProperty name field."""
+    while True:
+        if hasattr(name_obj, "value"):
+            name_obj = name_obj.value
+        elif isinstance(name_obj, dict) and "value" in name_obj:
+            name_obj = name_obj.get("value")
+        else:
+            break
+    return str(name_obj or "")
+
+
+def _extract_val(v: Any) -> Any:
+    """Unpack nested AXValue or dict value to raw primitive."""
+    while True:
+        if hasattr(v, "value"):
+            v = v.value
+        elif isinstance(v, dict) and "value" in v:
+            v = v.get("value")
+        else:
+            break
+    return v
+
+
+def is_interactive_node(node: Any) -> bool:
     """Determine whether an accessibility node is interactive."""
-    role = (node.get("role") or "").lower()
+    if not node:
+        return False
+
+    if isinstance(node, dict):
+        role_val = node.get("role")
+        raw_props = node.get("properties")
+    else:
+        role_val = getattr(node, "role", None)
+        raw_props = getattr(node, "properties", None)
+
+    role_str = ""
+    if role_val is not None:
+        role_raw = _extract_val(role_val)
+        role_str = "" if role_raw is None else str(role_raw)
+    role = role_str.strip().lower()
+
     if role in NON_INTERACTIVE_ROLES:
         return False
     if role in INTERACTIVE_ROLES:
         return True
-    properties = node.get("properties") or {}
-    if properties.get("focusable") is True or properties.get("focusable") == "true":
+
+    props_dict: Dict[str, Any] = {}
+    if isinstance(raw_props, dict):
+        props_dict = {str(k).lower(): _extract_val(v) for k, v in raw_props.items()}
+    elif isinstance(raw_props, list):
+        for p in raw_props:
+            if isinstance(p, dict):
+                p_name = p.get("name")
+                p_val = p.get("value")
+            else:
+                p_name = getattr(p, "name", None)
+                p_val = getattr(p, "value", None)
+            name_key = _extract_prop_name(p_name).lower()
+            val_out = _extract_val(p_val)
+            if name_key:
+                props_dict[name_key] = val_out
+
+    def _is_true(v: Any) -> bool:
+        if v is True:
+            return True
+        if isinstance(v, str) and v.lower() == "true":
+            return True
+        return False
+
+    if _is_true(props_dict.get("focusable")):
         return True
-    if properties.get("editable") is True or properties.get("editable") == "true":
+    if _is_true(props_dict.get("editable")):
         return True
-    if properties.get("settable") is True or properties.get("settable") == "true":
+    if _is_true(props_dict.get("settable")):
         return True
     return False
 
@@ -252,13 +313,8 @@ def _extract_ax_node_data(raw_node: Any) -> Dict[str, Any]:
     def _extract_text(obj: Any) -> str:
         if obj is None:
             return ""
-        if hasattr(obj, "value"):
-            v = obj.value
-            return str(v) if v is not None else ""
-        if isinstance(obj, dict):
-            v = obj.get("value")
-            return str(v) if v is not None else ""
-        return str(obj)
+        v = _extract_val(obj)
+        return str(v) if v is not None else ""
 
     role_str = _extract_text(role_val)
     name_str = _extract_text(name_val)
@@ -266,28 +322,21 @@ def _extract_ax_node_data(raw_node: Any) -> Dict[str, Any]:
     desc_str = _extract_text(desc_val)
 
     properties: Dict[str, Any] = {}
-    for p in raw_props:
-        if isinstance(p, dict):
-            p_name = p.get("name")
-            p_val = p.get("value")
-        else:
-            p_name = getattr(p, "name", None)
-            p_val = getattr(p, "value", None)
+    if isinstance(raw_props, dict):
+        properties = {str(k): _extract_val(v) for k, v in raw_props.items()}
+    elif isinstance(raw_props, list):
+        for p in raw_props:
+            if isinstance(p, dict):
+                p_name = p.get("name")
+                p_val = p.get("value")
+            else:
+                p_name = getattr(p, "name", None)
+                p_val = getattr(p, "value", None)
 
-        if hasattr(p_name, "value"):
-            name_key = str(p_name.value)
-        else:
-            name_key = str(p_name or "")
-
-        if hasattr(p_val, "value"):
-            val_out = p_val.value
-        elif isinstance(p_val, dict):
-            val_out = p_val.get("value")
-        else:
-            val_out = p_val
-
-        if name_key:
-            properties[name_key] = val_out
+            name_key = _extract_prop_name(p_name)
+            val_out = _extract_val(p_val)
+            if name_key:
+                properties[name_key] = val_out
 
     b_id = None
     if backend_id is not None:
