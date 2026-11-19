@@ -30,6 +30,7 @@ NULL_DEFAULT_PARAMS = {
     "fill_element": ["frame", "value", "value_env"],
     "paste_text": ["frame", "mode"],
     "snapshot_seed": ["label"],
+    "refresh_seed": ["profile", "source_dir"],
 }
 
 
