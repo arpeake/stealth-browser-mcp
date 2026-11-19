@@ -528,12 +528,6 @@ async def restore_session(
     if browser_manager is None:
         raise RuntimeError("Browser manager is not available.")
 
-    tab = await browser_manager.get_tab(instance_id)
-    if not tab:
-        raise Exception(f"Instance not found: {instance_id}")
-
-    browser = await browser_manager.get_browser(instance_id)
-
     source_file: Optional[str] = None
     if session_data is not None:
         if isinstance(session_data, str):
@@ -552,6 +546,12 @@ async def restore_session(
             source_file = str(def_path)
         else:
             raise ValueError("Either file_path or session_data must be provided.")
+
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        raise Exception(f"Instance not found: {instance_id}")
+
+    browser = await browser_manager.get_browser(instance_id)
 
     summary = await restore_session_state(
         tab=tab,

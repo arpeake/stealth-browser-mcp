@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from stealth_browser_mcp import cdp_raw, session_state
 from stealth_browser_mcp.browser_manager import BrowserManager
-from stealth_browser_mcp.models import BrowserOptions
+from stealth_browser_mcp.models import BrowserOptions, BrowserState
 from tests.browser_harness.server import FixtureServer
 
 RUN_BROWSER_TESTS = os.getenv("STEALTH_BROWSER_TESTS", "").strip().lower() in {"1", "true", "yes"}
@@ -169,16 +169,34 @@ class FakeBrowserForSession:
             tab.browser = self
 
 
-def create_fake_manager(browser: FakeBrowserForSession, current_tab: FakeCDPTab) -> BrowserManager:
+class FakeBrowserInstance:
+    """Fake BrowserInstance supporting update_activity for BrowserManager."""
+
+    def __init__(self, instance_id: str = "test_inst") -> None:
+        self.instance_id = instance_id
+        self.state = BrowserState.READY
+
+    def update_activity(self) -> None:
+        pass
+
+
+def create_fake_manager(
+    browser: FakeBrowserForSession,
+    current_tab: FakeCDPTab,
+    instance_id: str = "test_inst",
+) -> BrowserManager:
     """Build a BrowserManager pre-populated with a fake browser instance."""
     manager = BrowserManager()
-    manager._instances["test_inst"] = {
+    manager._instances[instance_id] = {
         "browser": browser,
         "tab": current_tab,
+        "instance": FakeBrowserInstance(instance_id),
         "navigation_count": 0,
         "options": BrowserOptions(),
         "init_scripts": [],
         "configured_tabs": set(),
+        "idle_timeout_seconds": 0,
+        "network_data": [],
     }
     return manager
 
@@ -508,8 +526,16 @@ class TestSessionStateUnit(unittest.TestCase):
         self.assertTrue(res_str["success"])
 
         # 3. Missing both file_path and session_data when no default file exists
+        def_path = session_state.default_session_path("test_inst")
+        if def_path.is_file():
+            try:
+                def_path.unlink()
+            except OSError:
+                pass
         with self.assertRaises(ValueError):
             asyncio.run(session_state.restore_session("nonexistent_without_default", browser_manager=manager))
+        with self.assertRaises(ValueError):
+            asyncio.run(session_state.restore_session("test_inst", browser_manager=manager))
 
 
 @unittest.skipUnless(
