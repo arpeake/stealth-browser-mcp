@@ -82,9 +82,16 @@ def source_hashes(root: Path) -> Dict[str, str]:
     hashes: Dict[str, str] = {}
     for dirpath, _dirnames, filenames in os.walk(str(root)):
         for name in filenames:
+            if name.startswith("Singleton"):
+                continue
             abs_path = Path(dirpath) / name
-            rel = abs_path.relative_to(root).as_posix()
-            hashes[rel] = sha256(abs_path)
+            try:
+                if os.path.islink(abs_path) or not os.path.isfile(abs_path):
+                    continue
+                rel = abs_path.relative_to(root).as_posix()
+                hashes[rel] = sha256(abs_path)
+            except FileNotFoundError:
+                continue
     return hashes
 
 

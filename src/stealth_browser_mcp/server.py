@@ -62,6 +62,7 @@ from .platform_utils import validate_browser_environment, get_platform_info
 from .process_cleanup import process_cleanup
 from .a11y_snapshot import a11y_manager
 from . import fill_tool
+from . import profiles
 from . import session_state
 from .har_export import build_har, export_to_json
 from . import seed_snapshots
