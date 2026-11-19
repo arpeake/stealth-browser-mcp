@@ -312,37 +312,44 @@ class DOMHandler:
     async def fill(
         tab: Tab,
         selector: str,
-        value: str,
+        value: Optional[Any] = None,
         frame: Optional[str] = None,
         instance_id: Optional[str] = None,
-    ) -> bool:
+        value_env: Optional[str] = None,
+        strategy: str = "auto",
+        verify: bool = True,
+        **kwargs: Any,
+    ) -> Any:
         """
-        Fill an input element with text by selector or ref=<id>.
-
-        Resolves the target element (including ref= targeting), focuses it,
-        clears any existing content, and enters the text.
+        Fill an element using the unified fill_tool implementation.
 
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector, deep selector, XPath, or ref=<id>.
-            value (str): Text value to fill into the element.
-            frame (Optional[str]): Same-origin iframe selector, name, or id.
+            value (Optional[Any]): Text or value to fill into the element.
+            frame (Optional[str]): Same-origin or cross-origin iframe selector, name, or id.
             instance_id (Optional[str]): Browser instance ID.
+            value_env (Optional[str]): Secret environment variable name (STEALTH_SECRET_ prefix).
+            strategy (str): Strategy override ('auto', 'native_setter', etc.).
+            verify (bool): Whether to verify read-back value.
+            **kwargs: Extra keyword arguments.
 
         Returns:
-            bool: True if filling succeeded.
+            Dict[str, Any]: Result with strategy used, verified bool, and safe preview.
         """
-        try:
-            backend_node_id = await DOMHandler._resolve_target(
-                tab, selector, DEFAULT_ELEMENT_TIMEOUT, frame=frame, instance_id=instance_id
-            )
-            await input_actions.focus_node(tab, backend_node_id)
-            await input_actions.clear_field(tab, backend_node_id)
-            for char in value:
-                await input_actions.type_character(tab, char)
-            return True
-        except Exception as e:
-            raise Exception(f"Failed to fill element: {str(e)}")
+        from .fill_tool import fill as fill_impl
+
+        return await fill_impl(
+            tab,
+            selector,
+            value=value,
+            value_env=value_env,
+            strategy=strategy,
+            verify=verify,
+            frame=frame,
+            instance_id=instance_id,
+            **kwargs,
+        )
 
     @staticmethod
     async def paste_text(
@@ -352,12 +359,13 @@ class DOMHandler:
         clear_first: bool = True,
         frame: Optional[str] = None,
         instance_id: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> bool:
         """
         Insert text in one step, like a paste.
 
-        Much faster than typing character by character. The page receives
-        beforeinput and input events but no key events.
+        Much faster than typing character by character. Supports modes in
+        {'synthetic', 'type', 'native'} or None (default keeps current behaviour).
 
         Args:
             tab (Tab): The browser tab object.
@@ -366,21 +374,46 @@ class DOMHandler:
             clear_first (bool): Clear input before pasting.
             frame (Optional[str]): Same-origin or cross-origin iframe selector, name, or id.
             instance_id (Optional[str]): Browser instance ID.
+            mode (Optional[str]): Paste mode ('synthetic', 'type', 'native', or None).
 
         Returns:
             bool: True if pasting succeeded.
         """
         from nodriver import cdp
 
+        if mode is not None and mode not in {"synthetic", "type", "native"}:
+            raise ValueError(f"Invalid paste mode: {mode}. Must be one of 'synthetic', 'type', 'native'")
+
         try:
             backend_node_id = await DOMHandler._resolve_target(
                 tab, selector, DEFAULT_ELEMENT_TIMEOUT, frame=frame, instance_id=instance_id
             )
+            if mode == "native":
+                from .fill_native_setter import fill_native_setter
+
+                await fill_native_setter(
+                    tab, backend_node_id, text=text, frame=frame, instance_id=instance_id
+                )
+                return True
+
             await input_actions.focus_node(tab, backend_node_id)
             if clear_first:
                 await input_actions.clear_field(tab, backend_node_id)
-            await tab.send(cdp.input_.insert_text(text))
-            return True
+
+            if mode == "synthetic":
+                from .fill_synthetic_paste import fill_synthetic_paste
+
+                await fill_synthetic_paste(
+                    tab, backend_node_id, text=text, frame=frame, instance_id=instance_id
+                )
+                return True
+            elif mode == "type":
+                for char in text:
+                    await input_actions.type_character(tab, char)
+                return True
+            else:
+                await tab.send(cdp.input_.insert_text(text))
+                return True
         except Exception as e:
             raise Exception(f"Failed to paste text: {str(e)}")
 
