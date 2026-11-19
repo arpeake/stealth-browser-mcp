@@ -405,13 +405,24 @@ class ProcessCleanupTreeKillTests(unittest.TestCase):
 
         fake_psutil = FakePsutil({})
 
+        # Instantiating ProcessCleanup runs startup orphan recovery which sweeps stale temp profiles
         with mock.patch("tempfile.gettempdir", return_value=str(temp_dir)):
             cleanup = self._create_cleanup(fake_psutil)
+
+        self.assertFalse(old_dir.exists())
+        self.assertTrue(fresh_dir.exists())
+
+        # Calling _sweep_orphaned_temp_profiles directly removes newly stale directories
+        stale_dir2 = temp_dir / "uc_stale_67891"
+        stale_dir2.mkdir(parents=True, exist_ok=True)
+        os.utime(str(stale_dir2), (now - 30000, now - 30000))
+
+        with mock.patch("tempfile.gettempdir", return_value=str(temp_dir)):
             with mock.patch("stealth_browser_mcp.process_cleanup.psutil", fake_psutil):
                 removed = cleanup._sweep_orphaned_temp_profiles()
 
         self.assertEqual(removed, 1)
-        self.assertFalse(old_dir.exists())
+        self.assertFalse(stale_dir2.exists())
         self.assertTrue(fresh_dir.exists())
 
 
