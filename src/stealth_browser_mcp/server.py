@@ -738,8 +738,8 @@ async def drop_files(
         Dict[str, Any]: { success: True, count: N, files: [basename, ...] }
     """
     return await drop_files_impl(
-        selector_or_instance=selector,
-        paths_or_selector=paths,
+        selector=selector,
+        paths=paths,
         instance_id=instance_id,
         browser_manager=browser_manager,
     )

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List, Optional
@@ -342,11 +343,25 @@ class TestDownloadsGated(unittest.TestCase):
             else:
                 executable = check_browser_executable() or "/usr/bin/google-chrome"
 
-        async def run_test():
-            temp_profile = tempfile.mkdtemp(prefix="stealth_dl_browser_")
-            browser = None
-            try:
-                with FixtureServer() as fixture_server:
+        fixture_server = FixtureServer()
+        fixture_server.start()
+        try:
+            probe_url = fixture_server.url_for("download.html")
+            ready = False
+            for _ in range(50):
+                try:
+                    with urllib.request.urlopen(probe_url, timeout=1.0) as resp:
+                        if resp.status == 200:
+                            ready = True
+                            break
+                except Exception:
+                    time.sleep(0.05)
+            self.assertTrue(ready, "FixtureServer failed to start on 127.0.0.1")
+
+            async def run_test():
+                temp_profile = tempfile.mkdtemp(prefix="stealth_dl_browser_")
+                browser = None
+                try:
                     config = uc.Config(
                         headless=True,
                         user_data_dir=temp_profile,
@@ -420,42 +435,44 @@ class TestDownloadsGated(unittest.TestCase):
                     drop_text = await tab.evaluate("document.getElementById('drop-result').textContent")
                     self.assertIn("fixture_test.txt", drop_text)
 
-            finally:
-                if browser is not None:
-                    try:
+                finally:
+                    if browser is not None:
+                        try:
+                            if getattr(browser, "connection", None) is not None:
+                                await asyncio.wait_for(
+                                    browser.connection.send(uc.cdp.browser.close()),
+                                    timeout=3.0,
+                                )
+                        except Exception:
+                            pass
+                        if getattr(browser, "_process", None) is not None:
+                            try:
+                                await _stop_process(browser._process)
+                            except Exception:
+                                pass
+                        connections = [
+                            getattr(t, "disconnect", None)
+                            for t in list(getattr(browser, "targets", []) or [])
+                        ]
                         if getattr(browser, "connection", None) is not None:
-                            await asyncio.wait_for(
-                                browser.connection.send(uc.cdp.browser.close()),
-                                timeout=3.0,
-                            )
-                    except Exception:
-                        pass
-                    if getattr(browser, "_process", None) is not None:
-                        try:
-                            await _stop_process(browser._process)
-                        except Exception:
-                            pass
-                    connections = [
-                        getattr(t, "disconnect", None)
-                        for t in list(getattr(browser, "targets", []) or [])
-                    ]
-                    if getattr(browser, "connection", None) is not None:
-                        connections.append(getattr(browser.connection, "disconnect", None))
-                    disconnects = [d() for d in connections if d is not None]
-                    if disconnects:
-                        try:
-                            await asyncio.wait(
-                                [asyncio.ensure_future(item) for item in disconnects],
-                                timeout=2.0,
-                            )
-                        except Exception:
-                            pass
-                    browser._process = None
+                            connections.append(getattr(browser.connection, "disconnect", None))
+                        disconnects = [d() for d in connections if d is not None]
+                        if disconnects:
+                            try:
+                                await asyncio.wait(
+                                    [asyncio.ensure_future(item) for item in disconnects],
+                                    timeout=2.0,
+                                )
+                            except Exception:
+                                pass
+                        browser._process = None
 
-                if os.path.exists(temp_profile):
-                    shutil.rmtree(temp_profile, ignore_errors=True)
+                    if os.path.exists(temp_profile):
+                        shutil.rmtree(temp_profile, ignore_errors=True)
 
-        asyncio.run(run_test())
+            asyncio.run(run_test())
+        finally:
+            fixture_server.stop()
 
 
 if __name__ == "__main__":

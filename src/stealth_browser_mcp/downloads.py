@@ -210,6 +210,19 @@ def validate_drop_paths(
     return resolved_paths
 
 
+def _target_key(target: Any) -> Union[str, int]:
+    """Return a hashable identifier for a Tab, Connection, or Browser object."""
+    target_id = getattr(target, "target_id", None)
+    if target_id is not None:
+        return str(target_id)
+    target_obj = getattr(target, "target", None)
+    if target_obj is not None:
+        target_id = getattr(target_obj, "target_id", None)
+        if target_id is not None:
+            return str(target_id)
+    return id(target)
+
+
 class DownloadManager:
     """Manages per-session download directories, CDP download behavior, and events."""
 
@@ -284,20 +297,31 @@ class DownloadManager:
             except Exception as e:
                 debug_logger.log_warning("downloads", "configure_download_directory", f"Tab send: {e}")
 
-        if hasattr(target, "add_handler") and target not in self._configured_targets:
-            self._configured_targets.add(target)
+        def on_will_begin(event: uc.cdp.browser.DownloadWillBegin) -> None:
+            self.on_download_will_begin(instance_id, event)
 
-            def on_will_begin(event: uc.cdp.browser.DownloadWillBegin) -> None:
-                self.on_download_will_begin(instance_id, event)
+        def on_progress(event: uc.cdp.browser.DownloadProgress) -> None:
+            self.on_download_progress(instance_id, event)
 
-            def on_progress(event: uc.cdp.browser.DownloadProgress) -> None:
-                self.on_download_progress(instance_id, event)
-
+        target_key = _target_key(target)
+        if hasattr(target, "add_handler") and target_key not in self._configured_targets:
+            self._configured_targets.add(target_key)
             try:
                 target.add_handler(uc.cdp.browser.DownloadWillBegin, on_will_begin)
                 target.add_handler(uc.cdp.browser.DownloadProgress, on_progress)
             except Exception:
                 pass
+
+        if browser is not None and getattr(browser, "connection", None) is not None:
+            conn = browser.connection
+            conn_key = f"conn_{_target_key(conn)}"
+            if hasattr(conn, "add_handler") and conn_key not in self._configured_targets:
+                self._configured_targets.add(conn_key)
+                try:
+                    conn.add_handler(uc.cdp.browser.DownloadWillBegin, on_will_begin)
+                    conn.add_handler(uc.cdp.browser.DownloadProgress, on_progress)
+                except Exception:
+                    pass
 
         return ensured_dir
 
@@ -469,21 +493,20 @@ async def wait_for_download(
 
 
 async def drop_files(
-    selector_or_instance: str,
-    paths_or_selector: Union[List[str], str],
+    selector: Optional[str] = None,
     paths: Optional[List[str]] = None,
     instance_id: Optional[str] = None,
     tab: Optional[Any] = None,
     browser_manager: Optional[Any] = None,
+    *args: Any,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """
     Drop files onto a drag-and-drop zone element via CDP Input.dispatchDragEvent and DataTransfer events.
 
     Args:
-        selector_or_instance: CSS selector / XPath, or instance ID if called as (instance_id, selector, paths).
-        paths_or_selector: List of file paths, or CSS selector if called with instance_id.
-        paths: List of file paths if called as (instance_id, selector, paths).
+        selector: CSS selector, deep selector, or XPath for the drop target element.
+        paths: List of absolute file paths to drop.
         instance_id: Optional browser instance ID.
         tab: Optional Tab instance.
         browser_manager: Optional BrowserManager.
@@ -497,20 +520,37 @@ async def drop_files(
             "selector": str,
         }
     """
-    if isinstance(paths_or_selector, list):
-        selector = selector_or_instance
-        file_paths = paths_or_selector
+    if selector is None:
+        selector = kwargs.get("selector_or_instance")
+    if paths is None:
+        raw_paths = kwargs.get("paths_or_selector")
+        if isinstance(raw_paths, list):
+            paths = raw_paths
+        elif isinstance(raw_paths, str) and selector is None:
+            selector = raw_paths
+
+    if isinstance(selector, str) and isinstance(paths, str) and (args or "paths" in kwargs):
+        resolved_instance_id = selector
+        resolved_selector = paths
+        resolved_paths = args[0] if args else kwargs.get("paths", [])
+    elif isinstance(selector, str) and isinstance(paths, list):
+        resolved_selector = selector
+        resolved_paths = paths
+        resolved_instance_id = instance_id or kwargs.get("instance")
+    elif selector is not None and paths is not None:
+        resolved_selector = str(selector)
+        resolved_paths = list(paths)
         resolved_instance_id = instance_id or kwargs.get("instance")
     else:
-        resolved_instance_id = selector_or_instance
-        selector = paths_or_selector
-        file_paths = paths or kwargs.get("paths", [])
+        resolved_selector = selector or kwargs.get("selector", "")
+        resolved_paths = paths or kwargs.get("paths", [])
+        resolved_instance_id = instance_id or kwargs.get("instance")
 
     session_dir = None
     if resolved_instance_id:
         session_dir = download_manager.get_download_dir(resolved_instance_id)
 
-    validated_paths = validate_drop_paths(file_paths, session_dir=session_dir)
+    validated_paths = validate_drop_paths(resolved_paths, session_dir=session_dir)
 
     target_tab = tab
     if target_tab is None and browser_manager is not None:
@@ -532,7 +572,7 @@ async def drop_files(
 
     x, y = 100.0, 100.0
     try:
-        backend_node_id = await input_actions.find_node(target_tab, selector)
+        backend_node_id = await input_actions.find_node(target_tab, resolved_selector)
         if backend_node_id is not None:
             center = await input_actions.node_center(target_tab, backend_node_id)
             if center is not None:
@@ -575,7 +615,7 @@ async def drop_files(
         debug_logger.log_warning("downloads", "drop_files_cdp", f"CDP dispatchDragEvent: {cdp_err}")
 
     try:
-        serialized_args = f"{json.dumps(selector)}, {json.dumps(files_payload)}"
+        serialized_args = f"{json.dumps(resolved_selector)}, {json.dumps(files_payload)}"
         await target_tab.evaluate(f"({DROP_FILES_JS})({serialized_args})")
     except Exception as js_err:
         debug_logger.log_warning("downloads", "drop_files_js", f"JS dispatchEvent: {js_err}")
@@ -585,5 +625,5 @@ async def drop_files(
         "count": len(validated_paths),
         "files": [Path(p).name for p in validated_paths],
         "paths": validated_paths,
-        "selector": selector,
+        "selector": resolved_selector,
     }
