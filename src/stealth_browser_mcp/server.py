@@ -52,6 +52,8 @@ from .a11y_snapshot import a11y_manager
 from . import fill_tool
 from . import session_state
 from .har_export import build_har, export_to_json
+from . import seed_snapshots
+from . import seed_tools
 
 DISABLED_SECTIONS = set()
 SECTION_TOOLS: Dict[str, List[str]] = defaultdict(list)
@@ -523,6 +525,63 @@ async def wait_for_download(
         browser_manager=browser_manager,
     )
 
+@section_tool("browser-management")
+async def snapshot_seed(
+    name: str,
+    label: Optional[str] = None,
+    max_snapshots: Optional[int] = 5,
+) -> Dict[str, Any]:
+    """
+    Take a snapshot of a seed directory.
+
+    Copies the seed directory to data_dir/snapshots/<name>/<timestamp>-<label>/
+    under the per-seed lock.
+
+    Args:
+        name (str): Validated seed name.
+        label (Optional[str]): Optional descriptive label for the snapshot.
+        max_snapshots (Optional[int]): Number of recent snapshots to retain (default: 5).
+
+    Returns:
+        Dict[str, Any]: Information about the created snapshot.
+    """
+    return seed_snapshots.snapshot_seed(name=name, label=label, max_snapshots=max_snapshots)
+
+@section_tool("browser-management")
+async def list_seed_snapshots(
+    name: str,
+) -> List[Dict[str, Any]]:
+    """
+    List snapshots for a seed directory.
+
+    Args:
+        name (str): Validated seed name.
+
+    Returns:
+        List[Dict[str, Any]]: List of snapshot descriptions.
+    """
+    return seed_snapshots.list_seed_snapshots(name=name)
+
+@section_tool("browser-management")
+async def restore_seed_snapshot(
+    name: str,
+    snapshot_id: str,
+) -> Dict[str, Any]:
+    """
+    Restore a seed directory from a snapshot.
+
+    Restores the exact file set under the per-seed lock and refuses if live
+    sessions use the seed.
+
+    Args:
+        name (str): Validated seed name.
+        snapshot_id (str): Identifier of the snapshot to restore.
+
+    Returns:
+        Dict[str, Any]: Result indicating restoration status.
+    """
+    return seed_snapshots.restore_seed_snapshot(name=name, snapshot_id=snapshot_id)
+
 @section_tool("element-interaction")
 async def query_elements(
     instance_id: str,
@@ -659,7 +718,7 @@ async def fill(
         value_env (Optional[str]): Name of an environment variable holding the secret
             (must start with STEALTH_SECRET_).
         strategy (str): Input strategy: 'auto', 'native_setter', 'synthetic_paste',
-            'typing', or 'choose_option'. Defaults to 'auto'.
+            'os_paste', 'typing', or 'choose_option'. Defaults to 'auto'.
         verify (bool): Whether to verify the filled value by reading it back. Defaults to True.
         frame (Optional[str]): Target element within an iframe (selector, name, or id).
 
@@ -733,7 +792,7 @@ async def paste_text(
         text (str): Text to paste.
         clear_first (bool): Clear field before pasting.
         frame (Optional[str]): Target element within an iframe (same-origin or cross-origin; selector, name, or id).
-        mode (Optional[str]): Paste mode in {'synthetic', 'type', 'native'}. Defaults to None (keeps current behaviour).
+        mode (Optional[str]): Paste mode in {'synthetic', 'type', 'native', 'clipboard', 'os_paste'}. Defaults to None (keeps current behaviour).
 
     Returns:
         bool: True if pasted successfully.
@@ -2323,6 +2382,23 @@ async def validate_browser_environment_tool() -> Dict[str, Any]:
         }
 
 
+@section_tool("debugging")
+async def doctor() -> Dict[str, Any]:
+    """
+    Run environment health checks: browser binaries per family, Linux keyring
+    reachability, seed ages, live sessions vs cap, stale locks, and whether the
+    data directory is writable. Secrets are redacted from the output.
+
+    Returns:
+        Dict[str, Any]: A summary with per-check status and an overall verdict.
+    """
+    try:
+        from .doctor import run_checks as doctor_run_checks
+        return doctor_run_checks()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @section_tool("progressive-cloning")
 async def clone_element_progressive(
     instance_id: str,
@@ -3452,6 +3528,66 @@ def validate_hook_function(function_code: str) -> Dict[str, Any]:
         Dict[str, Any]: Validation results with issues and warnings
     """
     return dynamic_hook_ai.validate_hook_function(function_code=function_code)
+
+
+@section_tool("browser-management")
+async def list_sources() -> Dict[str, Any]:
+    """
+    List installed browser profile sources and existing seeds with their age.
+
+    Discovers installed Chrome, Edge, and Brave browser profiles on Linux,
+    and reports existing seeds created with refresh_seed.
+
+    Returns:
+        Dict[str, Any]: Discovered browser profile sources and existing seeds.
+    """
+    return seed_tools.list_sources()
+
+
+@section_tool("browser-management")
+async def refresh_seed(
+    name: str,
+    source_browser: str,
+    profile: Optional[str] = None,
+    include_passwords: bool = False,
+    include_cards: bool = False,
+    indexeddb_cap_bytes: int = 50 * 1024 * 1024,
+    source_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Refresh or create a curated browser profile seed from a source browser.
+
+    Copies session state (cookies, local storage, extensions, settings) without
+    caches from the source profile into a dedicated seed directory. The source
+    directory is opened read-only and never modified.
+
+    Args:
+        name (str): Unique name for the seed (1-40 chars, [a-z0-9_-]).
+        source_browser (str): Source browser family ("chrome", "edge", "brave")
+            or path to user data directory.
+        profile (Optional[str]): Profile directory name inside the source (e.g.
+            "Default" or "Profile 1"). Defaults to auto-detecting the last-used profile.
+        include_passwords (bool): Whether to include saved login credentials.
+            Defaults to False.
+        include_cards (bool): Whether to include saved payment data.
+            Defaults to False.
+        indexeddb_cap_bytes (int): Maximum bytes to keep per IndexedDB origin.
+            Defaults to 52428800 (50 MB).
+        source_dir (Optional[str]): Explicit path to user data directory if not
+            using standard system locations.
+
+    Returns:
+        Dict[str, Any]: Summary of the refresh operation (status, counts, bytes).
+    """
+    return seed_tools.refresh_seed(
+        name=name,
+        source_browser=source_browser,
+        profile=profile,
+        include_passwords=include_passwords,
+        include_cards=include_cards,
+        indexeddb_cap_bytes=indexeddb_cap_bytes,
+        source_dir=source_dir,
+    )
 
 
 if parse_bool_env("XPOOL_SAFE_MODE", default=False):
