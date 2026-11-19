@@ -754,7 +754,7 @@ class DOMHandler:
                                     return_by_value=True,
                                 ))
                                 call_obj = call_res[0] if isinstance(call_res, tuple) else call_res
-                                clicked_option_id = getattr(call_obj, "value", None)
+                                clicked_option_id = call_obj.get("value") if isinstance(call_obj, dict) else getattr(call_obj, "value", None)
                             except Exception:
                                 clicked_option_id = None
                             try:
@@ -803,7 +803,7 @@ class DOMHandler:
                             await_promise=True,
                         ))
                     remote_obj = verify_res[0] if isinstance(verify_res, tuple) else verify_res
-                    val = getattr(remote_obj, "value", None)
+                    val = remote_obj.get("value") if isinstance(remote_obj, dict) else getattr(remote_obj, "value", None)
                     if isinstance(val, dict) and val.get("verified"):
                         verified = True
                         verification_info = val

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import time
@@ -56,10 +57,22 @@ class FakeFillTab:
 
         if method.startswith("Input."):
             t = params.get("type")
-            char = params.get("key") or params.get("text")
+            char = params.get("text") or params.get("key")
             self.events.append((method, t, char))
-            if t == "keyDown" and char:
-                self.typed_chars.append(char)
+            if (t == "keyDown" or t == "rawKeyDown") and char:
+                if t == "keyDown":
+                    self.typed_chars.append(char)
+                if char == "Backspace":
+                    self.current_value = ""
+                elif t == "keyDown" and len(char) == 1:
+                    if self.current_value is None:
+                        self.current_value = ""
+                    self.current_value += char
+            elif method == "Input.insertText":
+                ins_text = params.get("text", "")
+                if self.current_value is None:
+                    self.current_value = ""
+                self.current_value += ins_text
             return None
         if method == "DOM.focus":
             return None
@@ -76,12 +89,42 @@ class FakeFillTab:
                 backend_node_id=uc.cdp.dom.BackendNodeId(self.backend_node_id)
             )
         if method == "Runtime.evaluate":
-            return SimpleNamespace(object_id=uc.cdp.runtime.RemoteObjectId("elem-obj-1")), None
+            expr = params.get("expression", "")
+            return_by_val = params.get("returnByValue", False)
+
+            # Check if an option is being located or verified in a combobox
+            m = re.search(r'\)\(\s*"([^"]+)"', expr)
+            if m:
+                self.current_value = m.group(1)
+            elif "Option A" in expr:
+                self.current_value = "Option A"
+
+            if return_by_val:
+                val = {"verified": True, "reason": "verified"}
+                if self.current_value is not None:
+                    val["value"] = self.current_value
+                    val["text"] = self.current_value
+                return SimpleNamespace(
+                    object_id=uc.cdp.runtime.RemoteObjectId("elem-obj-1"),
+                    value=val,
+                ), None
+            return SimpleNamespace(
+                object_id=uc.cdp.runtime.RemoteObjectId("elem-obj-1"),
+                value=self.current_value,
+            ), None
         if method == "Runtime.releaseObject":
             return None
         if method == "Runtime.callFunctionOn":
             fn = params.get("functionDeclaration", "")
             args = params.get("arguments", [])
+
+            def _get_arg(idx=0, default=None):
+                if not args or len(args) <= idx:
+                    return default
+                a = args[idx]
+                if isinstance(a, dict):
+                    return a.get("value", default)
+                return getattr(a, "value", default)
 
             # Probe facts query
             if "tag_name" in fn and "is_content_editable" in fn:
@@ -102,17 +145,19 @@ class FakeFillTab:
                     ), None
                 if self.facts.get("is_content_editable") or self.facts.get("contenteditable"):
                     return SimpleNamespace(value={"text": str(self.current_value or "")}), None
-                return SimpleNamespace(value={"value": str(self.current_value or "")}), None
+                return SimpleNamespace(
+                    value={"value": str(self.current_value or ""), "text": str(self.current_value or "")}
+                ), None
 
             # Native setter
             if "HTMLInputElement" in fn and "value" in fn:
-                arg_val = args[0].value if args else ""
+                arg_val = _get_arg(0, "")
                 self.current_value = arg_val
                 return SimpleNamespace(value=arg_val), None
 
             # Synthetic paste
             if "ClipboardEvent" in fn:
-                arg_val = args[0].value if args else ""
+                arg_val = _get_arg(0, "")
                 self.current_value = arg_val
                 return SimpleNamespace(
                     value={"default_prevented": True, "defaultPrevented": True}
@@ -120,18 +165,19 @@ class FakeFillTab:
 
             # Checkbox / Radio setter
             if "checkedVal" in fn:
-                arg_val = args[0].value if args else False
+                arg_val = _get_arg(0, False)
                 self.current_checked = arg_val
                 return SimpleNamespace(value=arg_val), None
 
             # Select option on node
             if "criteria" in fn:
-                arg_val = args[0].value if args else ""
+                arg_val = _get_arg(0, "")
                 self.current_value = arg_val
                 return SimpleNamespace(value=True), None
 
             # Content clearing
             if "selectNodeContents" in fn or "this.select()" in fn:
+                self.current_value = ""
                 return SimpleNamespace(value=True), None
 
             return SimpleNamespace(value=True), None

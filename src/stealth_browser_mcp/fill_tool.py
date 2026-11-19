@@ -151,6 +151,35 @@ FORMATTABLE_KINDS = {
 }
 
 
+def _extract_prop(data: Any, prop: str, default: Any = "") -> Any:
+    """Extract a property from a dict, object, or primitive safely."""
+    if isinstance(data, dict):
+        if prop in data:
+            return data[prop]
+        if "value" in data and isinstance(data["value"], dict) and prop in data["value"]:
+            return data["value"][prop]
+    if hasattr(data, prop):
+        val = getattr(data, prop)
+        if val is not None:
+            return val
+    if hasattr(data, "value"):
+        val = getattr(data, "value")
+        if isinstance(val, dict) and prop in val:
+            return val[prop]
+        if prop == "value" and val is not None:
+            return val
+    if prop == "value":
+        if isinstance(data, (str, int, float)):
+            return str(data)
+    elif prop == "checked":
+        if isinstance(data, bool):
+            return data
+    elif prop == "text":
+        if isinstance(data, str):
+            return data
+    return default
+
+
 async def _resolve_node_and_facts(
     tab: Any,
     target: Any,
@@ -355,7 +384,7 @@ async def fill(
             # If paste wasn't prevented and verify is on, check if fallback typing is needed
             if verify:
                 read_data = await input_actions.call_on_node(tab, node_id, READ_VALUE_JS)
-                act_text = (read_data.get("text", "") if isinstance(read_data, dict) else str(read_data or "")).strip()
+                act_text = str(_extract_prop(read_data, "text", "") or _extract_prop(read_data, "value", "") or "").strip()
                 if not compare_text(formatted_val, act_text, mode="auto").equal:
                     await input_actions.focus_node(tab, node_id)
                     await input_actions.clear_field(tab, node_id)
@@ -411,23 +440,22 @@ async def fill(
 
         if verify:
             read_data = await input_actions.call_on_node(tab, node_id, READ_VALUE_JS)
-            read_dict = read_data if isinstance(read_data, dict) else {}
 
             if chosen_strategy == "checkbox":
-                actual_checked = bool(read_dict.get("checked"))
+                actual_checked = bool(_extract_prop(read_data, "checked", False))
                 verified = (actual_checked == checked_target)
                 actual_for_preview = str(actual_checked)
                 first_diff = -1 if verified else 0
 
             elif chosen_strategy == "radio":
-                actual_checked = bool(read_dict.get("checked"))
+                actual_checked = bool(_extract_prop(read_data, "checked", False))
                 verified = (actual_checked is True)
                 actual_for_preview = str(actual_checked)
                 first_diff = -1 if verified else 0
 
             elif chosen_strategy == "choose_option":
-                act_val = str(read_dict.get("value", "") or "")
-                act_txt = str(read_dict.get("text", "") or "")
+                act_val = str(_extract_prop(read_data, "value", "") or "")
+                act_txt = str(_extract_prop(read_data, "text", "") or "")
                 comp_v = compare_text(formatted_val, act_val, mode="auto")
                 comp_t = compare_text(formatted_val, act_txt, mode="auto")
                 verified = comp_v.equal or comp_t.equal
@@ -435,14 +463,14 @@ async def fill(
                 first_diff = -1 if verified else (comp_t.first_diff_index if not comp_t.equal else comp_v.first_diff_index)
 
             elif kind in (ElementKind.CONTENTEDITABLE, ElementKind.RICH_EDITOR):
-                act_text = str(read_dict.get("text", "") or "")
+                act_text = str(_extract_prop(read_data, "text", "") or _extract_prop(read_data, "value", "") or "")
                 comp = compare_text(formatted_val, act_text, mode="auto")
                 verified = comp.equal
                 actual_for_preview = act_text
                 first_diff = comp.first_diff_index
 
             else:
-                act_val = str(read_dict.get("value", "") or "")
+                act_val = str(_extract_prop(read_data, "value", "") or _extract_prop(read_data, "text", "") or "")
                 comp = compare_text(formatted_val, act_val, mode="auto")
                 verified = comp.equal
                 actual_for_preview = act_val
