@@ -66,6 +66,7 @@ from . import session_state
 from .har_export import build_har, export_to_json
 from . import seed_snapshots
 from . import seed_tools
+from . import seed_save
 
 DISABLED_SECTIONS = set()
 SECTION_TOOLS: Dict[str, List[str]] = defaultdict(list)
@@ -644,6 +645,33 @@ async def restore_seed_snapshot(
         Dict[str, Any]: Result indicating restoration status.
     """
     return seed_snapshots.restore_seed_snapshot(name=name, snapshot_id=snapshot_id)
+
+@section_tool("browser-management")
+async def save_to_seed(
+    session_id: str,
+    seed: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Save a running session's profile state back into its seed (or a new seed name).
+
+    Saves a session's profile state (cookies, local storage, settings) back into
+    its originating seed or a new seed name under the per-seed lock. Takes an
+    automatic snapshot of the existing seed first. The original source browser
+    profile is never modified.
+
+    Args:
+        session_id (str): ID of the session (or browser instance ID) to save from.
+        seed (Optional[str]): Target seed name (1-40 chars, [a-z0-9_-]). Defaults
+            to the seed the session was spawned from.
+
+    Returns:
+        Dict[str, Any]: Operation summary with status, seed name, and file counts.
+    """
+    if not profiles.session_exists(session_id):
+        session_info = await browser_manager.get_session_info(session_id)
+        if session_info and session_info.get("session_id"):
+            session_id = session_info["session_id"]
+    return seed_save.save_to_seed(session_id=session_id, seed=seed)
 
 @section_tool("element-interaction")
 async def query_elements(
