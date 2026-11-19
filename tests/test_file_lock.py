@@ -22,7 +22,7 @@ sys.path.insert(0, {src!r})
 from stealth_browser_mcp import file_lock
 
 path, die_file, pid_file = sys.argv[1], sys.argv[2], sys.argv[3]
-lock = file_lock.FileLock(path, timeout=5.0)
+lock = file_lock.FileLock(path, timeout=1.0)
 lock.acquire()
 with open(pid_file, "w") as handle:
     handle.write(str(os.getpid()))
@@ -62,6 +62,15 @@ class UnitTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = str(Path(self.directory.name) / "resource")
 
+    @staticmethod
+    def _terminate(proc):
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
     def test_acquire_release_roundtrip(self):
         lock = file_lock.FileLock(self.path, timeout=1.0)
         self.assertIs(lock.acquire(), lock)
@@ -100,9 +109,9 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(file_lock.is_pid_alive(-1))
         self.assertFalse(file_lock.is_pid_alive(None))
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"])
-        self.addCleanup(proc.terminate)
+            [sys.executable, "-c", "import time; time.sleep(5)"])
         self.addCleanup(proc.wait)
+        self.addCleanup(self._terminate, proc)
         time.sleep(0.2)
         self.assertTrue(file_lock.is_pid_alive(proc.pid))
 
@@ -138,7 +147,7 @@ class TwoSubprocessTests(unittest.TestCase):
         if proc is None:
             return
         try:
-            proc.wait(timeout=3.0)
+            proc.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
@@ -150,7 +159,7 @@ class TwoSubprocessTests(unittest.TestCase):
             cwd=str(ROOT),
         )
 
-    def _wait_for_pid(self, wait=10.0):
+    def _wait_for_pid(self, wait=5.0):
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             if os.path.exists(self.pid_file):
@@ -167,21 +176,21 @@ class TwoSubprocessTests(unittest.TestCase):
         self.assertTrue(lock.holder_alive())
 
         start = time.monotonic()
-        rc = self._waiter(timeout=1.0)
+        rc = self._waiter(timeout=0.6)
         elapsed = time.monotonic() - start
         self.assertEqual(rc, 3, "waiter should have timed out")
-        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertGreaterEqual(elapsed, 0.5)
 
+        # Signal the holder to release, then confirm a new waiter can acquire.
         open(self.die_file, "a").close()
-        with open(self.die_file):
-            pass
         try:
-            self.holder_proc.wait(timeout=3.0)
+            self.holder_proc.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
             self.holder_proc.kill()
             self.holder_proc.wait()
-        time.sleep(0.1)
-        self.assertEqual(self._waiter(timeout=2.0), 0, "should acquire after release")
+        time.sleep(0.2)
+        self.assertEqual(
+            self._waiter(timeout=1.5), 0, "should acquire after release")
 
     def test_dead_holder_is_acquirable_and_stale(self):
         self._holder()
@@ -193,10 +202,10 @@ class TwoSubprocessTests(unittest.TestCase):
         self.assertFalse(lock.holder_alive())
 
         start = time.monotonic()
-        rc = self._waiter(timeout=5.0)
+        rc = self._waiter(timeout=2.0)
         elapsed = time.monotonic() - start
         self.assertEqual(rc, 0, "waiter should acquire a stale lock")
-        self.assertLess(elapsed, 3.0, "stale acquisition should be fast")
+        self.assertLess(elapsed, 1.0, "stale acquisition should be fast")
 
 
 if __name__ == "__main__":

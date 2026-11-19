@@ -28,6 +28,8 @@ import os
 import sys
 import time
 
+import psutil
+
 if sys.platform == "win32":
     import msvcrt
     _HAS_FLOCK = False
@@ -58,28 +60,17 @@ def is_pid_alive(pid):
     """
     if pid is None or pid <= 0:
         return False
-    if sys.platform == "win32":
-        from ctypes import windll, c_int, byref
-        kernel32 = windll.kernel32
-        PROCESS_QUERY_INFORMATION = 0x0400
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, 0, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = c_int(0)
-            got = kernel32.GetExitCodeProcess(handle, byref(exit_code))
-            return bool(got) and exit_code.value == 267  # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    # ``psutil.pid_exists`` is used instead of ``os.kill(pid, 0)``: on Windows
+    # the latter calls ``TerminateProcess`` for every signal other than
+    # ``CTRL_C_EVENT``/``CTRL_BREAK_EVENT``, which would kill the target instead
+    # of merely probing it.
+    if not psutil.pid_exists(pid):
         return False
-    except PermissionError:
-        return True
-    return True
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+    return False
 
 
 class FileLock:
