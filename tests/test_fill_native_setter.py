@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -220,7 +221,14 @@ class TestFillNativeSetterRealBrowser(unittest.TestCase):
                 self.assertEqual(result, "react-verified-val")
                 val = await tab.evaluate("document.getElementById('target').value")
                 self.assertEqual(val, "react-verified-val")
-                events = await tab.evaluate("window.__events")
+                events_raw = await tab.evaluate("JSON.stringify(window.__events)")
+                if isinstance(events_raw, dict) and "value" in events_raw:
+                    events_raw = events_raw["value"]
+                events = (
+                    json.loads(events_raw)
+                    if isinstance(events_raw, str)
+                    else [item["value"] if isinstance(item, dict) and "value" in item else item for item in events_raw]
+                )
                 self.assertIn("input", events)
                 self.assertIn("change", events)
             finally:
