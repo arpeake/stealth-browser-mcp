@@ -332,9 +332,12 @@ class TestFamilyBinarySelection(_TempDataDir):
     def test_unknown_family_falls_back_or_raises(self):
         with mock.patch("shutil.which", return_value=None), mock.patch(
             "stealth_browser_mcp.session_spawn.check_browser_executable", return_value=None
+        ), mock.patch(
+            "stealth_browser_mcp.session_spawn.browser_sources.binary_candidates", return_value=[]
         ):
-            with self.assertRaises(RuntimeError):
-                session_spawn.find_family_binary("nonexistent_browser_family")
+            with mock.patch("os.path.exists", return_value=False), mock.patch("os.path.isfile", return_value=False):
+                with self.assertRaises(RuntimeError):
+                    session_spawn.find_family_binary("nonexistent_browser_family")
 
 
 class TestCapEnforcement(_TempDataDir):
