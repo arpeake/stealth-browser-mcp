@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import nodriver as uc
 from nodriver import Tab, cdp
 
+from .cdp_raw import raw_command
+
 INTERACTIVE_ROLES: Set[str] = {
     "button",
     "link",
@@ -37,11 +39,13 @@ INTERACTIVE_ROLES: Set[str] = {
 }
 
 NON_INTERACTIVE_ROLES: Set[str] = {
-    "RootWebArea",
-    "WebArea",
+    "rootwebarea",
+    "webarea",
     "root",
     "none",
     "presentation",
+    "generic",
+    "inlinetextbox",
 }
 
 DOM_WALK_JS = """function () {
@@ -227,7 +231,7 @@ def _extract_ax_node_data(raw_node: Any) -> Dict[str, Any]:
         desc_val = raw_node.get("description")
         parent_id = raw_node.get("parentId")
         child_ids = raw_node.get("childIds") or []
-        backend_id = raw_node.get("backendDOMNodeId")
+        backend_id = raw_node.get("backendDOMNodeId") or raw_node.get("backend_dom_node_id") or raw_node.get("backendNodeId")
         raw_props = raw_node.get("properties") or []
     else:
         node_id = str(getattr(raw_node, "node_id", ""))
@@ -238,7 +242,11 @@ def _extract_ax_node_data(raw_node: Any) -> Dict[str, Any]:
         desc_val = getattr(raw_node, "description", None)
         parent_id = getattr(raw_node, "parent_id", None)
         child_ids = getattr(raw_node, "child_ids", None) or []
-        backend_id = getattr(raw_node, "backend_dom_node_id", None)
+        backend_id = (
+            getattr(raw_node, "backend_dom_node_id", None)
+            or getattr(raw_node, "backendDOMNodeId", None)
+            or getattr(raw_node, "backend_node_id", None)
+        )
         raw_props = getattr(raw_node, "properties", None) or []
 
     def _extract_text(obj: Any) -> str:
@@ -610,11 +618,14 @@ async def _dom_walk_fallback(
     interactive_only: bool = False,
 ) -> Dict[str, Any]:
     """Fallback snapshot mechanism using a DOM-walk JS evaluation."""
-    eval_res = await tab.send(cdp.runtime.evaluate(
-        expression=f"({DOM_WALK_JS})()",
-        return_by_value=True,
-        await_promise=True,
-    ))
+    eval_res = await asyncio.wait_for(
+        tab.send(cdp.runtime.evaluate(
+            expression=f"({DOM_WALK_JS})()",
+            return_by_value=True,
+            await_promise=True,
+        )),
+        timeout=5.0,
+    )
     remote_obj = eval_res[0] if isinstance(eval_res, tuple) else eval_res
     val = getattr(remote_obj, "value", None) or {}
     root_raw = val.get("root") if isinstance(val, dict) else None
@@ -645,26 +656,42 @@ async def _dom_walk_fallback(
     collect_interactive(root_raw)
 
     try:
-        doc = await tab.send(cdp.dom.get_document(depth=0))
-        if doc and hasattr(doc, "node_id"):
+        doc = await asyncio.wait_for(
+            tab.send(cdp.dom.get_document(depth=0)),
+            timeout=3.0,
+        )
+        doc_node_id = getattr(doc, "node_id", None)
+        if doc_node_id is not None:
             for item in interactive_nodes:
                 marker = item.get("marker")
                 try:
-                    nid = await tab.send(cdp.dom.query_selector(doc.node_id, f'[data-a11y-marker="{marker}"]'))
+                    nid = await asyncio.wait_for(
+                        tab.send(cdp.dom.query_selector(doc_node_id, f'[data-a11y-marker="{marker}"]')),
+                        timeout=1.0,
+                    )
                     if nid:
-                        d = await tab.send(cdp.dom.describe_node(node_id=nid))
-                        if d and hasattr(d, "backend_node_id"):
-                            item["backend_node_id"] = int(d.backend_node_id)
+                        d = await asyncio.wait_for(
+                            tab.send(cdp.dom.describe_node(node_id=nid)),
+                            timeout=1.0,
+                        )
+                        b_id = getattr(d, "backend_node_id", None)
+                        if b_id is not None:
+                            item["backend_node_id"] = int(b_id)
+                        elif isinstance(d, dict) and "backendNodeId" in d.get("node", {}):
+                            item["backend_node_id"] = int(d["node"]["backendNodeId"])
                 except Exception:
                     pass
     except Exception:
         pass
     finally:
         try:
-            await tab.send(cdp.runtime.evaluate(
-                expression="document.querySelectorAll('[data-a11y-marker]').forEach(e => e.removeAttribute('data-a11y-marker'))",
-                return_by_value=True,
-            ))
+            await asyncio.wait_for(
+                tab.send(cdp.runtime.evaluate(
+                    expression="document.querySelectorAll('[data-a11y-marker]').forEach(e => e.removeAttribute('data-a11y-marker'))",
+                    return_by_value=True,
+                )),
+                timeout=2.0,
+            )
         except Exception:
             pass
 
@@ -763,10 +790,20 @@ async def get_accessibility_snapshot(
     raw_nodes = None
     try:
         try:
-            await tab.send(cdp.accessibility.enable())
+            await asyncio.wait_for(
+                tab.send(raw_command("Accessibility.enable")),
+                timeout=2.0,
+            )
         except Exception:
             pass
-        raw_nodes = await tab.send(cdp.accessibility.get_full_ax_tree())
+        res = await asyncio.wait_for(
+            tab.send(raw_command("Accessibility.getFullAXTree")),
+            timeout=3.0,
+        )
+        if isinstance(res, dict) and "nodes" in res:
+            raw_nodes = res["nodes"]
+        elif isinstance(res, list):
+            raw_nodes = res
     except Exception:
         raw_nodes = None
 

@@ -2,11 +2,16 @@
 
 import asyncio
 import os
+import shutil
 import sys
+import tempfile
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -34,6 +39,26 @@ HEADLESS_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 )
+
+INPUTS_HTML_PATH = ROOT / "tests" / "browser_harness" / "pages" / "inputs.html"
+INPUTS_HTML = INPUTS_HTML_PATH.read_text(encoding="utf-8") if INPUTS_HTML_PATH.exists() else ""
+
+
+def _safe_cleanup_dir(dir_path: Optional[str]) -> None:
+    if not dir_path or not os.path.exists(dir_path):
+        return
+    for _ in range(10):
+        try:
+            shutil.rmtree(dir_path, ignore_errors=False)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.1)
+    try:
+        shutil.rmtree(dir_path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 class RecordingTabForA11y:
@@ -524,35 +549,87 @@ class RealBrowserA11ySnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from stealth_browser_mcp.browser_manager import BrowserManager
         from stealth_browser_mcp.models import BrowserOptions
+        from stealth_browser_mcp.platform_utils import sandbox_must_be_disabled
 
+        self.temp_dir = tempfile.mkdtemp(prefix="stealth_a11y_test_")
         self.server = FixtureServer().start()
         self.manager = BrowserManager()
-        self.instance = await self.manager.spawn_browser(
-            BrowserOptions(headless=True, user_agent=HEADLESS_USER_AGENT)
+        self.instance = await asyncio.wait_for(
+            self.manager.spawn_browser(
+                BrowserOptions(
+                    headless=True,
+                    user_data_dir=self.temp_dir,
+                    user_agent=HEADLESS_USER_AGENT,
+                    sandbox=False if sandbox_must_be_disabled() else True,
+                )
+            ),
+            timeout=20.0,
         )
-        self.tab = await self.manager.get_tab(self.instance.instance_id)
+        self.tab = await asyncio.wait_for(
+            self.manager.get_tab(self.instance.instance_id),
+            timeout=20.0,
+        )
 
     async def asyncTearDown(self):
+        from stealth_browser_mcp.process_cleanup import process_cleanup
+
         if hasattr(self, "instance") and self.instance:
             try:
-                await self.manager.close_instance(self.instance.instance_id)
+                await asyncio.wait_for(
+                    self.manager.close_instance(self.instance.instance_id),
+                    timeout=5.0,
+                )
             except Exception:
                 pass
+        try:
+            await asyncio.wait_for(self.manager.close_all(), timeout=5.0)
+        except Exception:
+            pass
+        if hasattr(self, "temp_dir") and self.temp_dir:
+            try:
+                for pid in process_cleanup._get_browser_pids_for_profile(self.temp_dir):
+                    process_cleanup._kill_process_by_pid(pid, "test_harness")
+            except Exception:
+                pass
+            _safe_cleanup_dir(self.temp_dir)
         if hasattr(self, "server") and self.server:
-            self.server.stop()
+            try:
+                self.server.stop()
+            except Exception:
+                pass
+
+    def _get_inputs_url(self) -> str:
+        try:
+            if hasattr(self, "server") and self.server:
+                url = self.server.url_for("inputs.html")
+                with urllib.request.urlopen(url, timeout=1.0) as resp:
+                    if resp.status == 200:
+                        return url
+        except Exception:
+            pass
+        return "data:text/html," + quote(INPUTS_HTML)
 
     async def test_real_browser_snapshot_and_click_by_ref(self):
-        await self.manager.navigate(
-            self.instance.instance_id,
-            self.server.url_for("inputs.html"),
+        url = self._get_inputs_url()
+        await asyncio.wait_for(
+            self.manager.navigate(self.instance.instance_id, url),
+            timeout=20.0,
         )
+        self.tab = await asyncio.wait_for(
+            self.manager.get_tab(self.instance.instance_id),
+            timeout=20.0,
+        )
+        tab = self.tab
         await asyncio.sleep(0.3)
 
         # 1. Take accessibility snapshot
-        snapshot = await dom_handler.get_accessibility_snapshot(
-            self.tab,
-            instance_id=self.instance.instance_id,
-            max_nodes=100,
+        snapshot = await asyncio.wait_for(
+            dom_handler.get_accessibility_snapshot(
+                tab,
+                instance_id=self.instance.instance_id,
+                max_nodes=100,
+            ),
+            timeout=20.0,
         )
         self.assertIsNotNone(snapshot)
         text = snapshot["text"]
@@ -569,19 +646,28 @@ class RealBrowserA11ySnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(submit_ref, f"Submit button ref not found in {snapshot['refs']}")
 
         # 2. Attach click tracker to Submit button and click by ref=
-        await self.tab.evaluate(
-            "window.__btnClicked = false; "
-            "document.getElementById('submit-btn').addEventListener('click', () => { window.__btnClicked = true; });"
+        await asyncio.wait_for(
+            tab.evaluate(
+                "window.__btnClicked = false; "
+                "document.getElementById('submit-btn').addEventListener('click', () => { window.__btnClicked = true; });"
+            ),
+            timeout=20.0,
         )
-        clicked = await dom_handler.DOMHandler.click_element(
-            self.tab,
-            f"ref={submit_ref}",
-            instance_id=self.instance.instance_id,
+        clicked = await asyncio.wait_for(
+            dom_handler.DOMHandler.click_element(
+                tab,
+                f"ref={submit_ref}",
+                instance_id=self.instance.instance_id,
+            ),
+            timeout=20.0,
         )
         self.assertTrue(clicked)
         await asyncio.sleep(0.1)
 
-        btn_clicked = await self.tab.evaluate("window.__btnClicked")
+        btn_clicked = await asyncio.wait_for(
+            tab.evaluate("window.__btnClicked"),
+            timeout=20.0,
+        )
         self.assertTrue(btn_clicked)
 
         # 3. Also test clicking checkbox by ref=
@@ -591,24 +677,39 @@ class RealBrowserA11ySnapshotTests(unittest.IsolatedAsyncioTestCase):
                 checkbox_ref = ref_id
                 break
         self.assertIsNotNone(checkbox_ref)
-        await dom_handler.DOMHandler.click_element(
-            self.tab,
-            f"ref={checkbox_ref}",
-            instance_id=self.instance.instance_id,
+        await asyncio.wait_for(
+            dom_handler.DOMHandler.click_element(
+                tab,
+                f"ref={checkbox_ref}",
+                instance_id=self.instance.instance_id,
+            ),
+            timeout=20.0,
         )
-        is_checked = await self.tab.evaluate("document.getElementById('checkbox-input').checked")
+        is_checked = await asyncio.wait_for(
+            tab.evaluate("document.getElementById('checkbox-input').checked"),
+            timeout=20.0,
+        )
         self.assertTrue(is_checked)
 
     async def test_real_browser_fill_and_type_by_ref(self):
-        await self.manager.navigate(
-            self.instance.instance_id,
-            self.server.url_for("inputs.html"),
+        url = self._get_inputs_url()
+        await asyncio.wait_for(
+            self.manager.navigate(self.instance.instance_id, url),
+            timeout=20.0,
         )
+        self.tab = await asyncio.wait_for(
+            self.manager.get_tab(self.instance.instance_id),
+            timeout=20.0,
+        )
+        tab = self.tab
         await asyncio.sleep(0.3)
 
-        snapshot = await dom_handler.get_accessibility_snapshot(
-            self.tab,
-            instance_id=self.instance.instance_id,
+        snapshot = await asyncio.wait_for(
+            dom_handler.get_accessibility_snapshot(
+                tab,
+                instance_id=self.instance.instance_id,
+            ),
+            timeout=20.0,
         )
 
         # Find ref for text input
@@ -620,15 +721,21 @@ class RealBrowserA11ySnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(text_input_ref, f"Text Input ref not found in {snapshot['refs']}")
 
         # Fill by ref=
-        filled = await dom_handler.DOMHandler.fill(
-            self.tab,
-            f"ref={text_input_ref}",
-            "Automated Text",
-            instance_id=self.instance.instance_id,
+        filled = await asyncio.wait_for(
+            dom_handler.DOMHandler.fill(
+                tab,
+                f"ref={text_input_ref}",
+                "Automated Text",
+                instance_id=self.instance.instance_id,
+            ),
+            timeout=20.0,
         )
         self.assertTrue(filled)
 
-        val = await self.tab.evaluate("document.getElementById('text-input').value")
+        val = await asyncio.wait_for(
+            tab.evaluate("document.getElementById('text-input').value"),
+            timeout=20.0,
+        )
         self.assertEqual(val, "Automated Text")
 
         # Also test type_text on email input by ref=
@@ -639,49 +746,76 @@ class RealBrowserA11ySnapshotTests(unittest.IsolatedAsyncioTestCase):
                 break
         self.assertIsNotNone(email_ref, f"Email ref not found in {snapshot['refs']}")
 
-        typed = await dom_handler.DOMHandler.type_text(
-            self.tab,
-            f"ref={email_ref}",
-            "user@test.com",
-            instance_id=self.instance.instance_id,
+        typed = await asyncio.wait_for(
+            dom_handler.DOMHandler.type_text(
+                tab,
+                f"ref={email_ref}",
+                "user@test.com",
+                instance_id=self.instance.instance_id,
+            ),
+            timeout=20.0,
         )
         self.assertTrue(typed)
-        email_val = await self.tab.evaluate("document.getElementById('email-input').value")
+        email_val = await asyncio.wait_for(
+            tab.evaluate("document.getElementById('email-input').value"),
+            timeout=20.0,
+        )
         self.assertEqual(email_val, "user@test.com")
 
     async def test_real_browser_size_cap_truncated(self):
-        await self.manager.navigate(
-            self.instance.instance_id,
-            self.server.url_for("inputs.html"),
+        url = self._get_inputs_url()
+        await asyncio.wait_for(
+            self.manager.navigate(self.instance.instance_id, url),
+            timeout=20.0,
         )
+        self.tab = await asyncio.wait_for(
+            self.manager.get_tab(self.instance.instance_id),
+            timeout=20.0,
+        )
+        tab = self.tab
         await asyncio.sleep(0.3)
 
         # Cap max_nodes at 3
-        snapshot = await dom_handler.get_accessibility_snapshot(
-            self.tab,
-            instance_id=self.instance.instance_id,
-            max_nodes=3,
+        snapshot = await asyncio.wait_for(
+            dom_handler.get_accessibility_snapshot(
+                tab,
+                instance_id=self.instance.instance_id,
+                max_nodes=3,
+            ),
+            timeout=20.0,
         )
         self.assertTrue(snapshot["truncated"])
         self.assertLessEqual(snapshot["node_count"], 3)
 
     async def test_real_browser_stale_ref_raises(self):
-        await self.manager.navigate(
-            self.instance.instance_id,
-            self.server.url_for("inputs.html"),
+        url = self._get_inputs_url()
+        await asyncio.wait_for(
+            self.manager.navigate(self.instance.instance_id, url),
+            timeout=20.0,
         )
+        self.tab = await asyncio.wait_for(
+            self.manager.get_tab(self.instance.instance_id),
+            timeout=20.0,
+        )
+        tab = self.tab
         await asyncio.sleep(0.3)
 
-        await dom_handler.get_accessibility_snapshot(
-            self.tab,
-            instance_id=self.instance.instance_id,
+        await asyncio.wait_for(
+            dom_handler.get_accessibility_snapshot(
+                tab,
+                instance_id=self.instance.instance_id,
+            ),
+            timeout=20.0,
         )
 
         with self.assertRaises(Exception) as ctx:
-            await dom_handler.DOMHandler.click_element(
-                self.tab,
-                "ref=e9999",
-                instance_id=self.instance.instance_id,
+            await asyncio.wait_for(
+                dom_handler.DOMHandler.click_element(
+                    tab,
+                    "ref=e9999",
+                    instance_id=self.instance.instance_id,
+                ),
+                timeout=20.0,
             )
         self.assertIn("ref 'e9999' not found in latest accessibility snapshot", str(ctx.exception))
 

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from nodriver import Tab, cdp
 
 from .a11y_snapshot import a11y_manager, extract_ref_id, is_ref_selector
+from .cdp_raw import raw_command
 from .key_definitions import resolve_key_descriptor
 
 SHIFTED_SYMBOLS = set('~!@#$%^&*()_+{}|:"<>?')
@@ -761,9 +762,19 @@ async def find_node(
             tab=tab,
         )
         try:
-            node = await tab.send(cdp.dom.describe_node(backend_node_id=cdp.dom.BackendNodeId(backend_node_id)))
-            if node and hasattr(node, "backend_node_id"):
-                return int(node.backend_node_id)
+            node = await asyncio.wait_for(
+                tab.send(raw_command("DOM.describeNode", {"backendNodeId": int(backend_node_id)})),
+                timeout=3.0,
+            )
+            b_id = getattr(node, "backend_node_id", None)
+            if b_id is not None:
+                return int(b_id)
+            if isinstance(node, dict) and "node" in node and "backendNodeId" in node["node"]:
+                return int(node["node"]["backendNodeId"])
+            if isinstance(node, dict) and "backendNodeId" in node:
+                return int(node["backendNodeId"])
+            return int(backend_node_id)
+        except asyncio.TimeoutError:
             return int(backend_node_id)
         except Exception as e:
             raise Exception(f"Stale ref '{selector}': element no longer exists in DOM") from e
