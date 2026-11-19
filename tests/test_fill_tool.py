@@ -60,6 +60,14 @@ class FakeFillTab:
             char = params.get("text") or params.get("key")
             self.events.append((method, t, char))
             if (t == "keyDown" or t == "rawKeyDown") and char:
+                if "paste" in params.get("commands", []):
+                    try:
+                        from stealth_browser_mcp import os_clipboard
+                        b = os_clipboard._get_backend()
+                        if b is not None:
+                            self.current_value = b.get_text()
+                    except Exception:
+                        pass
                 if t == "keyDown":
                     self.typed_chars.append(char)
                 if char == "Backspace":
@@ -572,6 +580,52 @@ class PasteModePlumbingTests(unittest.TestCase):
         )
         self.assertTrue(success)
         self.assertGreater(len(tab.typed_chars), 0)
+
+    def test_paste_mode_clipboard_plumbing(self):
+        from stealth_browser_mcp import os_clipboard
+        from tests.test_os_clipboard import RecordingBackend, _fake_backend_factory
+
+        orig_flag = os.environ.get(os_clipboard.ENV_FLAG)
+        os.environ[os_clipboard.ENV_FLAG] = "1"
+        try:
+            backend = RecordingBackend(current="initial")
+            with unittest.mock.patch.object(os_clipboard, "_get_backend", _fake_backend_factory(backend)):
+                tab = FakeFillTab(backend_node_id=42)
+                success = asyncio.run(
+                    dom_handler.DOMHandler.paste_text(tab, "#target", "clipboard text", mode="clipboard")
+                )
+                self.assertTrue(success)
+                self.assertEqual(tab.current_value, "clipboard text")
+        finally:
+            if orig_flag is None:
+                os.environ.pop(os_clipboard.ENV_FLAG, None)
+            else:
+                os.environ[os_clipboard.ENV_FLAG] = orig_flag
+
+    def test_fill_strategy_os_paste(self):
+        from stealth_browser_mcp import os_clipboard
+        from tests.test_os_clipboard import RecordingBackend, _fake_backend_factory
+
+        orig_flag = os.environ.get(os_clipboard.ENV_FLAG)
+        os.environ[os_clipboard.ENV_FLAG] = "1"
+        try:
+            backend = RecordingBackend(current="initial")
+            with unittest.mock.patch.object(os_clipboard, "_get_backend", _fake_backend_factory(backend)):
+                tab = FakeFillTab(
+                    backend_node_id=42,
+                    facts={"tag_name": "input", "type": "text", "input_type": "text"},
+                )
+                res = asyncio.run(
+                    fill_tool.fill(tab, "#target", value="os paste val", strategy="os_paste", verify=True)
+                )
+                self.assertTrue(res["verified"])
+                self.assertEqual(res["strategy"], "os_paste")
+                self.assertEqual(tab.current_value, "os paste val")
+        finally:
+            if orig_flag is None:
+                os.environ.pop(os_clipboard.ENV_FLAG, None)
+            else:
+                os.environ[os_clipboard.ENV_FLAG] = orig_flag
 
     def test_paste_mode_invalid_raises_value_error(self):
         tab = FakeFillTab(backend_node_id=42)
