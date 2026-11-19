@@ -495,7 +495,8 @@ class WaitForToolTests(unittest.IsolatedAsyncioTestCase):
         orig_manager = server.browser_manager
         server.browser_manager = manager
         try:
-            result = await server.wait_for(
+            wait_fn = getattr(server.wait_for, "fn", server.wait_for)
+            result = await wait_fn(
                 instance_id="tool-inst",
                 timeout=50,
             )
