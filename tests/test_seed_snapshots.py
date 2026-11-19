@@ -311,14 +311,14 @@ class ServerMCPToolTests(_TempDataDir):
 
         # Snapshot tool
         snap_res = asyncio.run(
-            server.snapshot_seed("mcp_seed", label="mcp_snap")
+            server.snapshot_seed.fn("mcp_seed", label="mcp_snap")
         )
         self.assertEqual(snap_res["status"], "ok")
         snap_id = snap_res["snapshot_id"]
 
         # List tool
         list_res = asyncio.run(
-            server.list_seed_snapshots("mcp_seed")
+            server.list_seed_snapshots.fn("mcp_seed")
         )
         self.assertEqual(len(list_res), 1)
         self.assertEqual(list_res[0]["snapshot_id"], snap_id)
@@ -330,7 +330,7 @@ class ServerMCPToolTests(_TempDataDir):
 
         # Restore tool
         restore_res = asyncio.run(
-            server.restore_seed_snapshot("mcp_seed", snap_id)
+            server.restore_seed_snapshot.fn("mcp_seed", snap_id)
         )
         self.assertEqual(restore_res["status"], "ok")
         self.assertFalse((sdir / "unwanted.txt").exists())
