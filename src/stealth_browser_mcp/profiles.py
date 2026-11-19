@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import psutil
+
 from .paths import data_dir
 
 # Seed names must stay safe as directory components: short, no separators, no
@@ -90,18 +92,22 @@ def session_path(session_id) -> Path:
 def pid_alive(pid: Optional[int]) -> bool:
     """Return True when a process with ``pid`` currently exists.
 
-    A ``None`` pid is never alive. A pid that cannot be signalled because of
-    permissions still exists and is treated as alive.
+    A ``None`` or non-positive pid is never alive. A pid that has become a
+    zombie (exited but not yet reaped) is treated as dead.
+
+    ``psutil.pid_exists`` is used instead of ``os.kill(pid, 0)``: on Windows the
+    latter calls ``TerminateProcess`` for every signal other than
+    ``CTRL_C_EVENT``/``CTRL_BREAK_EVENT``, which would kill the target instead
+    of merely probing it.
     """
-    if not pid:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if not psutil.pid_exists(pid):
         return False
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
-    except PermissionError:
-        return True
-    return True
 
 
 def seed_defaults(source_browser, source_dir, profile_subdir, password_store=None, defaults=None, now=None) -> Dict[str, Any]:
