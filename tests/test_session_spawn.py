@@ -301,6 +301,14 @@ class TestSpawnPlanConstruction(_TempDataDir):
 
 
 class TestFamilyBinarySelection(_TempDataDir):
+    def setUp(self):
+        super().setUp()
+        # CI exports STEALTH_BROWSER_EXECUTABLE for the gated job; it overrides family lookup.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("STEALTH_BROWSER_EXECUTABLE", None)
+
     """Unit tests for browser family binary selection (SB-47)."""
 
     def test_chrome_family_candidates(self):
