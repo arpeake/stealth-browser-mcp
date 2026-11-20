@@ -237,12 +237,12 @@ class FakeTreeTests(unittest.TestCase):
             env = {"HOME": str(self.base)}
         else:
             env = {"HOME": str(self.base)}
-        root = Path(browser_sources.user_data_root(family, platform, env))
+        root = Path(browser_sources.user_data_root(family, platform, env).replace("\\", os.sep))
         # Local State at the root.
         write_json(root / browser_sources.LOCAL_STATE_FILE, self._make_profile_state(names))
         # One profile directory per name.
         for name in names:
-            src = Path(browser_sources.source_path(family, name, platform, env))
+            src = Path(browser_sources.source_path(family, name, platform, env).replace("\\", os.sep))
             src.mkdir(parents=True, exist_ok=True)
         return env, root
 
@@ -255,7 +255,7 @@ class FakeTreeTests(unittest.TestCase):
         self.assertTrue((root / browser_sources.LOCAL_STATE_FILE).is_file())
         text = (root / browser_sources.LOCAL_STATE_FILE).read_text(encoding="ascii")
         self.assertEqual(browser_sources.parse_profiles_from_local_state(text), ["Default", "Profile 1"])
-        self.assertTrue(Path(browser_sources.source_path("chrome", "Profile 1", "windows", env)).exists())
+        self.assertTrue(Path(browser_sources.source_path("chrome", "Profile 1", "windows", env).replace("\\", os.sep)).exists())
 
     def test_linux_edge_tree(self):
         env, root = self._build_tree("linux", "edge", ["Default"])
