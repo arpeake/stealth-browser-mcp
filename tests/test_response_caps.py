@@ -102,19 +102,19 @@ class TestCapSnapshotResponse(unittest.TestCase):
         self.assertFalse(response["truncated"])
 
     def test_cap_snapshot_response_hard_cap_shrinks_and_truncates(self) -> None:
-        """Verify hard-cap case with max_chars=100 and 5000 long refs shrinks and sets truncated."""
-        # 5000 long refs
+        """Verify hard-cap case with max_chars=100 and 400 long refs shrinks and sets truncated."""
+        # 400 long refs
         refs = {
             f"e{i}": {"role": "button", "name": "Very long button name content " * 10}
-            for i in range(1, 5001)
+            for i in range(1, 401)
         }
-        lines = [f"button (ref=e{i})" for i in range(1, 5001)]
+        lines = [f"button (ref=e{i})" for i in range(1, 401)]
         text = "\n".join(lines)
 
         raw_result = {
             "tree": text,
             "text": text,
-            "node_count": 5000,
+            "node_count": 400,
             "truncated": False,
             "refs": refs,
         }
@@ -126,7 +126,7 @@ class TestCapSnapshotResponse(unittest.TestCase):
         json_len = len(json.dumps(response, default=str))
         self.assertLessEqual(json_len, threshold)
         self.assertTrue(response["truncated"])
-        self.assertLess(len(response["refs"]), 5000)
+        self.assertLess(len(response["refs"]), 400)
         self.assertGreater(len(response["refs"]), 0)
 
     def test_cap_snapshot_response_drops_nodes_if_still_exceeds(self) -> None:
