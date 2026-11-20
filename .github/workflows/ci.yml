@@ -31,7 +31,14 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Unit tests (Windows, no browser)
         shell: bash
-        run: python -m unittest discover -s tests 2>&1 | tail -60
+        run: |
+          set +e
+          python -W ignore -m unittest discover -s tests > unit.txt 2>&1
+          code=$?
+          grep -E "^(FAIL|ERROR): |^Ran |^FAILED|^OK" unit.txt
+          echo "---- details ----"
+          grep -A16 -E "^(FAIL|ERROR): " unit.txt | head -600
+          exit $code
 
   package:
     runs-on: ubuntu-latest
