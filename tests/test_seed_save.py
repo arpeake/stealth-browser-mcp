@@ -536,7 +536,7 @@ class SeedSaveUnitTests(_TempDataDir):
         self._create_sample_session("sess_fw", seed="seed_fw")
 
         # 1. Default flush_wait_seconds=6.0
-        with mock.patch("time.sleep") as mock_sleep:
+        with mock.patch("stealth_browser_mcp.seed_save._flush_sleep") as mock_sleep:
             res = seed_save.save_to_seed("sess_fw", close_first=False)
             mock_sleep.assert_called_once_with(6.0)
 
@@ -547,13 +547,13 @@ class SeedSaveUnitTests(_TempDataDir):
         self.assertTrue(profiles.session_exists("sess_fw"))
 
         # 2. Configurable flush_wait_seconds (e.g. 2.0)
-        with mock.patch("time.sleep") as mock_sleep:
+        with mock.patch("stealth_browser_mcp.seed_save._flush_sleep") as mock_sleep:
             res2 = seed_save.save_to_seed("sess_fw", close_first=False, flush_wait_seconds=2.0)
             mock_sleep.assert_called_once_with(2.0)
         self.assertIn("warning", res2)
 
         # 3. flush_wait_seconds=0 disables wait
-        with mock.patch("time.sleep") as mock_sleep:
+        with mock.patch("stealth_browser_mcp.seed_save._flush_sleep") as mock_sleep:
             res3 = seed_save.save_to_seed("sess_fw", close_first=False, flush_wait_seconds=0)
             mock_sleep.assert_not_called()
         self.assertIn("warning", res3)
@@ -564,7 +564,7 @@ class SeedSaveUnitTests(_TempDataDir):
         self._create_sample_session("tool_sess3", seed="tool_seed3")
 
         # Default close_first=False calls time.sleep and returns warning
-        with mock.patch("time.sleep") as mock_sleep:
+        with mock.patch("stealth_browser_mcp.seed_save._flush_sleep") as mock_sleep:
             res = asyncio.run(server.save_to_seed.fn("tool_sess3"))
             mock_sleep.assert_called_once_with(6.0)
         self.assertEqual(res["status"], "ok")
@@ -572,7 +572,7 @@ class SeedSaveUnitTests(_TempDataDir):
 
         # close_first=True calls fake close and does not return warning
         with mock.patch.object(seed_save, "close_session_browser") as mock_close, \
-             mock.patch("time.sleep") as mock_sleep:
+             mock.patch("stealth_browser_mcp.seed_save._flush_sleep") as mock_sleep:
             res2 = asyncio.run(server.save_to_seed.fn("tool_sess3", close_first=True))
             mock_sleep.assert_not_called()
             mock_close.assert_called_once()

@@ -47,6 +47,11 @@ def seed_lock(name: str, timeout: float = 10.0) -> FileLock:
 seed_save_lock = seed_lock
 
 
+def _flush_sleep(seconds: float) -> None:
+    """Sleep helper for flushing pending profile writes before copying."""
+    time.sleep(seconds)
+
+
 def _copy_entry_recursive(src: Path, dst: Path) -> None:
     """Recursively copy a file or directory tree."""
     if src.is_dir():
@@ -168,13 +173,16 @@ def save_to_seed(
     """
     profiles.check_session_id(session_id)
 
+    if not profiles.session_exists(session_id):
+        raise profiles.ProfileError(f"session not found: {session_id}")
+
+    session_data = profiles.load_session(session_id)
+    orig_seed: Optional[str] = session_data.get("seed")
+
     if seed is not None and isinstance(seed, str) and seed.strip():
         target_seed = seed.strip()
     else:
-        if not profiles.session_exists(session_id):
-            raise profiles.ProfileError(f"session not found: {session_id}")
-        session_data = profiles.load_session(session_id)
-        target_seed = session_data.get("seed")
+        target_seed = orig_seed
 
     if not target_seed:
         raise profiles.ProfileError(f"no seed specified and session {session_id} has no recorded seed")
@@ -198,6 +206,8 @@ def save_to_seed(
         if not session_path.is_dir():
             raise profiles.ProfileError(f"session directory not found: {session_id}")
 
+        orig_seed = session_data.get("seed")
+
         if close_first and not browser_already_closed:
             if close_browser_fn is not None:
                 close_res = close_browser_fn(session_id)
@@ -213,7 +223,7 @@ def save_to_seed(
                 elif not loop.is_running():
                     loop.run_until_complete(close_res)
         elif not close_first and flush_wait_seconds > 0:
-            time.sleep(flush_wait_seconds)
+            _flush_sleep(flush_wait_seconds)
 
         # Step 1: Automatic snapshot if seed already exists
         snapshot_id: Optional[str] = None
