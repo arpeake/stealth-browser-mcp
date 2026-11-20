@@ -173,15 +173,15 @@ def save_to_seed(
     """
     profiles.check_session_id(session_id)
 
-    if not profiles.session_exists(session_id):
-        raise profiles.ProfileError(f"session not found: {session_id}")
-
-    session_data = profiles.load_session(session_id)
-    orig_seed: Optional[str] = session_data.get("seed")
-
+    orig_seed: Optional[str] = None
     if seed is not None and isinstance(seed, str) and seed.strip():
         target_seed = seed.strip()
+        if profiles.session_exists(session_id):
+            orig_seed = profiles.load_session(session_id).get("seed")
     else:
+        if not profiles.session_exists(session_id):
+            raise profiles.ProfileError(f"session not found: {session_id}")
+        orig_seed = profiles.load_session(session_id).get("seed")
         target_seed = orig_seed
 
     if not target_seed:
