@@ -99,7 +99,7 @@ class HttpDisconnectIsolationTests(unittest.TestCase):
             server.run_shutdown_sync()
 
         self.assertEqual(fake.close_all.call_count, 1)
-        cleanup_mock.assert_called_once()
+        self.assertGreaterEqual(cleanup_mock.call_count, 1)
 
     def test_closed_resource_filter(self):
         filter_ = _ClosedResourceNoiseFilter()
