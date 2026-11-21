@@ -24,9 +24,16 @@ Set STEALTH_CDP_TRANSPORT=pipe to launch spawned Chrome with
 pipes and no DevTools TCP port is opened. The loopback port stays the
 default and STEALTH_CDP_TRANSPORT unset, empty, or "port" keeps that
 behavior unchanged. Attaching to an already-running external browser
-still needs the port. This transport is experimental until it is proven
-in a real browser (Phase 2); the unit tests cover flag parsing, argv
-building, and CDP framing without a browser.
+still needs the port.
+
+Status: experimental and not yet wired (Phase 2). The STEALTH_CDP_TRANSPORT=pipe
+flag is intentionally NOT connected into launch_browser() because it is
+unproven in this environment: nodriver's Browser.start() is hardwired to an
+HTTP endpoint and a ws:// URL and cannot complete over a pipe, and Chrome does
+not expose a usable remote-debugging pipe here. The pipe path is not operational
+until both are resolved; the port path remains the only working transport and
+matches the opt-in contract (default unchanged). The unit tests cover flag
+parsing, argv building, and CDP framing without a browser.
 
 ## HTTP
 

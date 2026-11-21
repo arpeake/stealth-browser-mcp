@@ -20,6 +20,29 @@ No nodriver import lives in this module so the parsing, argv building, and
 framing stay unit-testable without a real browser or the nodriver package.
 """
 
+# SB-POST-1 status note (kept as plain ASCII so it survives tooling that
+# refuses non-ASCII source, and is greppable on "SBPOST1").
+#
+# Phase 1 (done): flag parsing, Chrome argv building, and the CDP-over-pipe
+# framing/client in this module are complete and unit-tested (tests/
+# test_sb_post1_cdp_pipe.py). The full unit suite is green and Phase 1 is
+# committed.
+#
+# Phase 2 (NOT wired): the STEALTH_CDP_TRANSPORT=pipe flag is not yet connected
+# into launch_browser() because of two blockers discovered during
+# environment verification:
+#   (a) nodriver's Browser.start() is hardwired to an HTTP endpoint and a ws://
+#       URL (it calls HTTPApi(...).get("version") then Connection(url)). A
+#       pipe-launched browser emits no webSocketDebuggerUrl and no TCP port, so
+#       nodriver cannot complete start() over a pipe without a nodriver change.
+#   (b) Chrome reports "Remote debugging pipe file descriptors are not open"
+#       in this sandbox even with real inherited FIFOs on fds 0/1 and sends no
+#       response, so the pipe channel is non-functional here.
+# Do NOT connect the flag in launch_browser() until nodriver is changed to
+# support a pluggable transport (or a nodriver-compatible pipe) and Chrome's
+# pipe is functional in the CI/verification environment. Until then the port
+# path remains the only working transport, which matches the opt-in contract.
+
 from __future__ import annotations
 
 import asyncio
