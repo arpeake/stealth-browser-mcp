@@ -23,6 +23,7 @@ and framing stay unit-testable without a real browser or the nodriver package.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import os
 from enum import Enum
@@ -305,8 +306,37 @@ class PipeCDPClient:
         self.next_id = 1
         self._pending: Dict[int, asyncio.Future] = {}
         self._frames: "asyncio.Queue" = asyncio.Queue()
+        self._session_queues: Dict[str, List[asyncio.Queue]] = collections.defaultdict(list)
         self._buffer = b""
         self._closed = False
+        self._write_lock: Optional[asyncio.Lock] = None
+
+    def _get_write_lock(self) -> asyncio.Lock:
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        return self._write_lock
+
+    async def write_frame(self, payload: bytes) -> None:
+        lock = self._get_write_lock()
+        async with lock:
+            total = 0
+            while total < len(payload):
+                n = os.write(self._write_fd, payload[total:])
+                total += n
+
+    def register_session(self, session_id: str) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._session_queues[session_id].append(q)
+        return q
+
+    def unregister_session(self, session_id: str, queue: asyncio.Queue) -> None:
+        if session_id in self._session_queues:
+            try:
+                self._session_queues[session_id].remove(queue)
+            except ValueError:
+                pass
+            if not self._session_queues[session_id]:
+                del self._session_queues[session_id]
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         """Return the running loop, binding it lazily so no loop is required.
@@ -395,12 +425,20 @@ class PipeCDPClient:
             return
         if not data:
             # EOF: peer closed its write end; stop reading.
+            self._closed = True
+            self._frames.put_nowait(_EOF)
+            for q_list in list(self._session_queues.values()):
+                for q in q_list:
+                    q.put_nowait(_EOF)
             return
         self._buffer += data
         frames, leftover = split_nul_frames(self._buffer)
         self._buffer = leftover
         for frame in frames:
-            message = json.loads(frame.decode("utf-8"))
+            try:
+                message = json.loads(frame.decode("utf-8"))
+            except Exception:
+                continue
             msg_id = message.get("id")
             future = self._pending.pop(msg_id, None)
             if future is not None:
@@ -412,10 +450,12 @@ class PipeCDPClient:
                 else:
                     if not future.done():
                         future.set_result(message.get("result", {}))
-            # Route the parsed frame to the generic queue too, so a
-            # PipeWebSocket.recv() consumer can receive events it did not
-            # await as a request/response.
-            self._frames.put_nowait(message)
+            session_id = message.get("sessionId")
+            if session_id is not None and session_id in self._session_queues:
+                for q in self._session_queues[session_id]:
+                    q.put_nowait(message)
+            else:
+                self._frames.put_nowait(message)
 
     async def get_frame(self, timeout: float) -> Any:
         """Pop the next parsed frame or raise on timeout/EOF.
@@ -449,6 +489,10 @@ class PipeCDPClient:
         there is no executor thread or reader task to cancel or await.
         """
         self._closed = True
+        self._frames.put_nowait(_EOF)
+        for q_list in list(self._session_queues.values()):
+            for q in q_list:
+                q.put_nowait(_EOF)
         loop = self._get_loop()
         try:
             loop.remove_reader(self._read_fd)
@@ -469,6 +513,10 @@ class PipeCDPClient:
         thread has to be joined.
         """
         self._closed = True
+        self._frames.put_nowait(_EOF)
+        for q_list in list(self._session_queues.values()):
+            for q in q_list:
+                q.put_nowait(_EOF)
         loop = self._get_loop()
         if loop.is_running():
             try:
@@ -497,6 +545,8 @@ class PipeWebSocket:
         read_fd: int,
         write_fd: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        session_id: Optional[str] = None,
+        client: Optional[PipeCDPClient] = None,
     ) -> None:
         import websockets.exceptions
 
@@ -505,14 +555,20 @@ class PipeWebSocket:
         # Bind the loop that is already running; never get_event_loop(). The
         # loop is passed to the wrapped client so both share one loop.
         self._loop = loop or asyncio.get_running_loop()
-        self._client = PipeCDPClient(read_fd, write_fd, self._loop)
+        self._owns_client = client is None
+        self._client = client or PipeCDPClient(read_fd, write_fd, self._loop)
+        self._session_id = session_id
+        self._queue: Optional[asyncio.Queue] = None
+        if session_id is not None:
+            self._queue = self._client.register_session(session_id)
         self.close_code = None
         self.closed = True
-        self.websocket_url = "ws://pipe"
+        self.websocket_url = f"ws://pipe/{session_id}" if session_id else "ws://pipe"
         self._exceptions = websockets.exceptions
 
     async def start(self) -> "PipeWebSocket":
-        await self._client.start()
+        if self._owns_client:
+            await self._client.start()
         self.closed = False
         return self
 
@@ -524,21 +580,39 @@ class PipeWebSocket:
         EOF must raise ``websockets.exceptions.ConnectionClosed`` to let the
         listener tear down.
         """
-        try:
-            frame = await self._client.get_frame(0.05)
-        except CdpPipeError:
-            raise self._exceptions.ConnectionClosed("pipe closed")
-        return json.dumps(frame)
+        if self._session_id is not None and self._queue is not None:
+            try:
+                frame = await asyncio.wait_for(self._queue.get(), 0.05)
+            except asyncio.TimeoutError:
+                raise
+            if frame is _EOF:
+                raise self._exceptions.ConnectionClosed("pipe closed")
+            return json.dumps(frame)
+        else:
+            try:
+                frame = await self._client.get_frame(0.05)
+            except CdpPipeError:
+                raise self._exceptions.ConnectionClosed("pipe closed")
+            return json.dumps(frame)
 
     async def send(self, message: str) -> None:
-        os.write(self._write_fd, message.encode("utf-8") + _NUL)
+        if self._session_id is not None:
+            obj = json.loads(message)
+            obj["sessionId"] = self._session_id
+            payload = json.dumps(obj).encode("utf-8") + _NUL
+        else:
+            payload = message.encode("utf-8") + _NUL
+        await self._client.write_frame(payload)
 
     async def close(self) -> None:
         if self.closed:
             return
         self.closed = True
         self.close_code = 1000
-        await self._client.close()
+        if self._session_id is not None and self._queue is not None:
+            self._client.unregister_session(self._session_id, self._queue)
+        if self._owns_client:
+            await self._client.close()
 
     def sync_close(self) -> None:
         """Stop and close the adapter without awaiting (cleanup-safe).
@@ -548,7 +622,10 @@ class PipeWebSocket:
         """
         self.closed = True
         self.close_code = 1000
-        self._client.sync_close()
+        if self._session_id is not None and self._queue is not None:
+            self._client.unregister_session(self._session_id, self._queue)
+        if self._owns_client:
+            self._client.sync_close()
 
 
 class PipeConnection:
@@ -581,11 +658,22 @@ class PipeConnection:
     async def connect(self, **kwargs):
         if self._ws.closed:
             await self._ws.start()
+        if self._real._listener_task is None or self._real._listener_task.done():
+            self._real._listener_task = asyncio.ensure_future(self._real._listener())
         await self._real._register_handlers()
 
     async def disconnect(self):
+        if self._real._listener_task:
+            self._real._listener_task.cancel()
         if self._ws is not None:
             await self._ws.close()
+
+    async def send(self, *args, **kwargs):
+        if self._real._listener_task is None or self._real._listener_task.done():
+            if self._ws.closed:
+                await self._ws.start()
+            self._real._listener_task = asyncio.ensure_future(self._real._listener())
+        return await self._real.send(*args, **kwargs)
 
     def __getattr__(self, item):
         return getattr(self._real, item)
