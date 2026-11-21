@@ -11,46 +11,22 @@ This module adds an opt-in alternative that talks CDP over Chrome's inherited
 browsers this server spawns. Attaching to an already-running external browser
 still needs the port and is untouched here.
 
-The pipe is a plain in-process duplex channel. Chrome frames every CDP
-message the way the DevTools protocol documents for pipes: a 4-byte big-endian
-unsigned length prefix followed by the JSON message. This module implements
-that framing plus a small async client used to drive a pipe-launched browser.
+Chrome's plain ``--remote-debugging-pipe`` (no value) speaks JSON CDP messages
+each terminated by a single NUL byte (``\\0``) in both directions. The 4-byte
+big-endian length prefix is only used for ``--remote-debugging-pipe=cbor`` which
+this server never requests, so the framing in this module is NUL-delimited JSON.
 
-No nodriver import lives in this module so the parsing, argv building, and
-framing stay unit-testable without a real browser or the nodriver package.
+No nodriver import lives at module import time so the parsing, argv building,
+and framing stay unit-testable without a real browser or the nodriver package.
 """
-
-# SB-POST-1 status note (kept as plain ASCII so it survives tooling that
-# refuses non-ASCII source, and is greppable on "SBPOST1").
-#
-# Phase 1 (done): flag parsing, Chrome argv building, and the CDP-over-pipe
-# framing/client in this module are complete and unit-tested (tests/
-# test_sb_post1_cdp_pipe.py). The full unit suite is green and Phase 1 is
-# committed.
-#
-# Phase 2 (NOT wired): the STEALTH_CDP_TRANSPORT=pipe flag is not yet connected
-# into launch_browser() because of two blockers discovered during
-# environment verification:
-#   (a) nodriver's Browser.start() is hardwired to an HTTP endpoint and a ws://
-#       URL (it calls HTTPApi(...).get("version") then Connection(url)). A
-#       pipe-launched browser emits no webSocketDebuggerUrl and no TCP port, so
-#       nodriver cannot complete start() over a pipe without a nodriver change.
-#   (b) Chrome reports "Remote debugging pipe file descriptors are not open"
-#       in this sandbox even with real inherited FIFOs on fds 0/1 and sends no
-#       response, so the pipe channel is non-functional here.
-# Do NOT connect the flag in launch_browser() until nodriver is changed to
-# support a pluggable transport (or a nodriver-compatible pipe) and Chrome's
-# pipe is functional in the CI/verification environment. Until then the port
-# path remains the only working transport, which matches the opt-in contract.
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import struct
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Environment flag that selects the opt-in pipe transport. Exact match.
 CDP_TRANSPORT_ENV = "STEALTH_CDP_TRANSPORT"
@@ -59,8 +35,17 @@ CDP_TRANSPORT_ENV = "STEALTH_CDP_TRANSPORT"
 TRANSPORT_PORT = "port"
 TRANSPORT_PIPE = "pipe"
 
-# Chrome pipe framing: 4-byte big-endian length prefix + JSON body.
-_LENGTH_PREFIX_SIZE = 4
+# NUL is the delimiter Chrome uses between CDP messages on a plain pipe.
+_NUL = b"\0"
+
+# fd numbers Chrome uses for a plain --remote-debugging-pipe: commands from fd 3,
+# responses/events on fd 4 (Puppeteer's PipeTransport and Playwright's pipe
+# launch map the same two fds).
+COMMAND_FD = 3
+RESPONSE_FD = 4
+
+# Sentinel placed on the frame queue when the pipe read end is exhausted.
+_EOF = object()
 
 # Raised when Chrome replies with a CDP error object.
 class CdpPipeError(Exception):
@@ -147,24 +132,162 @@ def build_chrome_launch_args(
     return args
 
 
+def split_nul_frames(buffer: bytes) -> Tuple[List[bytes], bytes]:
+    """Split a byte buffer into complete NUL-delimited messages.
+
+    Args:
+        buffer (bytes): Bytes accumulated so far from the pipe read end.
+
+    Returns:
+        Tuple[List[bytes], bytes]: The complete frame payloads (without the
+        trailing NUL) and the leftover partial bytes that do not yet contain a
+        full delimiter.
+    """
+    parts = buffer.split(_NUL)
+    return parts[:-1], parts[-1]
+
+
+class PipeDescriptors:
+    """Two os.pipe() pairs used to drive a pipe-launched Chrome child.
+
+    The parent writes CDP commands on ``command_w`` and the child maps its fd 3
+    to the matching read end; Chrome writes responses on ``response_w`` and the
+    parent reads them from ``response_r``.
+    """
+
+    def __init__(
+        self,
+        command_r: int,
+        command_w: int,
+        response_r: int,
+        response_w: int,
+    ) -> None:
+        self.command_r = command_r
+        self.command_w = command_w
+        self.response_r = response_r
+        self.response_w = response_w
+
+    def map_child_fds(self) -> Any:
+        """Return a preexec_fn mapping child fd 3/4 onto these pipes."""
+
+        def _map_fds():
+            os.dup2(self.command_r, COMMAND_FD)
+            os.dup2(self.response_w, RESPONSE_FD)
+            for fd in (
+                self.command_r,
+                self.command_w,
+                self.response_r,
+                self.response_w,
+            ):
+                if fd not in (COMMAND_FD, RESPONSE_FD):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+        return _map_fds
+
+    def close_parent_unused(self) -> None:
+        """Close the ends the parent does not use after the child inherits them."""
+        for fd in (self.command_r, self.response_w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        for fd in (
+            self.command_r,
+            self.command_w,
+            self.response_r,
+            self.response_w,
+        ):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def open_chrome_pipe() -> PipeDescriptors:
+    """Create the two pipe pairs used to drive a pipe-launched Chrome child.
+
+    The caller must spawn Chrome with ``--remote-debugging-pipe`` and a preexec_fn
+    from :meth:`PipeDescriptors.map_child_fds`, then close the parent's unused
+    ends via :meth:`PipeDescriptors.close_parent_unused`.
+    """
+    cmd_r, cmd_w = os.pipe()
+    resp_r, resp_w = os.pipe()
+    return PipeDescriptors(cmd_r, cmd_w, resp_r, resp_w)
+
+
+def spawn_chrome_with_pipe(
+    executable: str,
+    launch_args: List[str],
+    *,
+    stdin: Any = asyncio.subprocess.DEVNULL,
+    stdout: Any = asyncio.subprocess.DEVNULL,
+    stderr: Any = asyncio.subprocess.DEVNULL,
+) -> Tuple[Any, PipeDescriptors]:
+    """Spawn Chrome over ``--remote-debugging-pipe`` with its fds mapped.
+
+    Chrome's plain pipe reads CDP commands from fd 3 and writes responses and
+    events on fd 4. We create two ``os.pipe()`` pairs, map the child's fd 3 to
+    the read end of our command pipe and fd 4 to the write end of our response
+    pipe, then close the unused ends in the parent. ``close_fds`` must stay
+    False so the inherited descriptors are not closed before Chrome starts.
+
+    Args:
+        executable (str): Path to the Chrome/Chromium executable.
+        launch_args (List[str]): Chrome arguments; must include
+            ``--remote-debugging-pipe``.
+        stdin: Child standard input (defaults to the null device).
+        stdout: Child standard output (defaults to the null device).
+        stderr: Child standard error (defaults to the null device).
+
+    Returns:
+        Tuple[asyncio.subprocess.Process, PipeDescriptors]: The launched child
+        and the descriptor bundle the parent uses (``command_w`` to write,
+        ``response_r`` to read).
+    """
+    descriptors = open_chrome_pipe()
+    process = asyncio.create_subprocess_exec(
+        executable,
+        *launch_args,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        close_fds=False,
+        preexec_fn=descriptors.map_child_fds(),
+    )
+    # The child inherits its own copies via dup2; close the parent's unused ends.
+    descriptors.close_parent_unused()
+    return process, descriptors
+
+
 class PipeCDPClient:
     """Minimal async CDP client over an inherited Chrome pipe.
 
-    The pipe is exposed to the server as a pair of file descriptors that
-    already belong to this process, so this client does not open a socket:
-    it wraps the write end to send frames and a reader loop on the read end
-    to collect them. Chrome sends a 4-byte big-endian length prefix followed
-    by the JSON message body.
+    The pipe is exposed to the server as a pair of file descriptors that already
+    belong to this process, so this client does not open a socket: it wraps the
+    read end to collect frames and the write end to send them. Chrome frames a
+    plain ``--remote-debugging-pipe`` as JSON CDP messages each terminated by a
+    single NUL byte in both directions.
 
-    A typical construction is ``PipeCDPClient(r, w, loop)`` with ``r`` and
-    ``w`` the read/write ends Chrome inherited. Callers are responsible for
-    spawning Chrome with ``--remote-debugging-pipe`` and passing it the same
-    descriptors.
+    The reader never blocks the event loop: readiness on the read fd is handled
+    by the loop's selector via ``loop.add_reader``. There is no executor worker
+    thread and no reader task, so teardown cannot hang joining a worker blocked
+    inside ``os.read`` (which cancelling an asyncio task or closing the fds
+    would not interrupt on Linux). The client always binds the loop that is
+    already running via ``get_running_loop``. Callers are responsible for
+    spawning Chrome with ``--remote-debugging-pipe`` and passing it the matching
+    descriptors via a preexec_fn.
+
+    A typical construction is ``await PipeCDPClient(read_fd, write_fd).start()``.
 
     Args:
-        reader: AsyncReaderProtocol exposing awaitable read primitives.
-        writer: AsyncWriterProtocol exposing drain/close primitives.
-        loop: The running event loop to bind the reader task to.
+        read_fd: File descriptor Chrome writes responses/events to.
+        write_fd: File descriptor the server writes commands to.
+        loop: Optional running event loop; ignored (``get_running_loop`` wins).
 
     Attributes:
         next_id (int): Monotonic CDP message id counter, starting at 1.
@@ -172,17 +295,31 @@ class PipeCDPClient:
 
     def __init__(
         self,
-        reader: "Any",
-        writer: "Any",
+        read_fd: int,
+        write_fd: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
-        self.reader = reader
-        self.writer = writer
-        self._loop = loop or asyncio.get_running_loop()
+        self._read_fd = read_fd
+        self._write_fd = write_fd
+        self._loop = loop
         self.next_id = 1
         self._pending: Dict[int, asyncio.Future] = {}
-        self._reader_task: Optional[asyncio.Task] = None
+        self._frames: "asyncio.Queue" = asyncio.Queue()
+        self._buffer = b""
         self._closed = False
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the running loop, binding it lazily so no loop is required.
+
+        Always uses ``asyncio.get_running_loop`` (never ``get_event_loop``),
+        which is the documented way to reach the loop an async call is running
+        in.
+        """
+        loop = self._loop
+        if loop is None:
+            loop = asyncio.get_running_loop()
+            self._loop = loop
+        return loop
 
     def send(
         self,
@@ -190,7 +327,7 @@ class PipeCDPClient:
         params: Optional[Dict[str, Any]] = None,
         message_id: Optional[int] = None,
     ) -> int:
-        """Serialize and queue a CDP request.
+        """Serialize and write a CDP request as one NUL-delimited JSON frame.
 
         Args:
             method (str): CDP method name, e.g. "Browser.getVersion".
@@ -209,8 +346,7 @@ class PipeCDPClient:
         if params is not None:
             request["params"] = params
         body = json.dumps(request).encode("utf-8")
-        frame = struct.pack(">I", len(body)) + body
-        self.writer.write(frame)
+        os.write(self._write_fd, body + _NUL)
         return msg_id
 
     async def call(
@@ -235,7 +371,7 @@ class PipeCDPClient:
         """
         if self._closed:
             raise CdpPipeError("client is closed")
-        future = self._loop.create_future()
+        future = self._get_loop().create_future()
         msg_id = self.send(method, params)
         self._pending[msg_id] = future
         try:
@@ -243,46 +379,213 @@ class PipeCDPClient:
         finally:
             self._pending.pop(msg_id, None)
 
-    async def _reader_loop(self) -> None:
-        reader = self.reader
-        while True:
-            header = await reader.readexactly(_LENGTH_PREFIX_SIZE)
-            (length,) = struct.unpack(">I", header)
-            body = await reader.readexactly(length)
-            message = json.loads(body.decode("utf-8"))
+    def _on_readable(self) -> None:
+        """Selector callback for the read fd; runs on the event loop.
+
+        The selector wakes us only when data is readable, so the loop is never
+        blocked waiting on a read. This pulls a chunk, feeds the length-
+        delimited parser, and dispatches completed frames to awaiting callers.
+        """
+        if self._closed:
+            return
+        try:
+            data = os.read(self._read_fd, 65536)
+        except OSError:
+            # Pipe closed or the fd was removed during teardown.
+            return
+        if not data:
+            # EOF: peer closed its write end; stop reading.
+            return
+        self._buffer += data
+        frames, leftover = split_nul_frames(self._buffer)
+        self._buffer = leftover
+        for frame in frames:
+            message = json.loads(frame.decode("utf-8"))
             msg_id = message.get("id")
-            if "error" in message:
-                future = self._pending.pop(msg_id, None)
-                if future is not None and not future.done():
-                    future.set_exception(
-                        CdpPipeError(json.dumps(message["error"]))
-                    )
-                continue
             future = self._pending.pop(msg_id, None)
-            if future is not None and not future.done():
-                future.set_result(message.get("result", {}))
+            if future is not None:
+                if "error" in message:
+                    if not future.done():
+                        future.set_exception(
+                            CdpPipeError(json.dumps(message["error"]))
+                        )
+                else:
+                    if not future.done():
+                        future.set_result(message.get("result", {}))
+            # Route the parsed frame to the generic queue too, so a
+            # PipeWebSocket.recv() consumer can receive events it did not
+            # await as a request/response.
+            self._frames.put_nowait(message)
+
+    async def get_frame(self, timeout: float) -> Any:
+        """Pop the next parsed frame or raise on timeout/EOF.
+
+        Used by PipeWebSocket.recv(): returns a dict message or, on EOF, raises
+        an error mirroring a closed websocket. On timeout it re-raises
+        ``asyncio.TimeoutError`` so callers can retry.
+        """
+        try:
+            frame = await asyncio.wait_for(self._frames.get(), timeout)
+        except asyncio.TimeoutError:
+            raise
+        if frame is _EOF:
+            raise CdpPipeError("pipe read end closed")
+        return frame
 
     async def start(self) -> "PipeCDPClient":
-        """Start the background reader loop and return self."""
-        self._reader_task = self._loop.create_task(self._reader_loop())
+        """Register the read fd for readiness and return self.
+
+        The loop's selector drives ``_on_readable``; there is no reader task to
+        join on shutdown.
+        """
+        loop = self._get_loop()
+        loop.add_reader(self._read_fd, self._on_readable)
         return self
 
     async def close(self) -> None:
-        """Stop the reader loop and close the pipe."""
+        """Unregister the read fd and close the pipe ends (await from our loop).
+
+        Removing the fd from the selector is the only cleanup the loop needs;
+        there is no executor thread or reader task to cancel or await.
+        """
         self._closed = True
-        task = self._reader_task
-        if task is not None and not task.done():
-            task.cancel()
+        loop = self._get_loop()
+        try:
+            loop.remove_reader(self._read_fd)
+        except (RuntimeError, ValueError, FileNotFoundError):
+            pass
         self._pending.clear()
-        task = self._reader_task
-        self._reader_task = None
-        if task is not None:
+        for fd in (self._read_fd, self._write_fd):
             try:
-                await task
-            except (asyncio.CancelledError, Exception):
+                os.close(fd)
+            except OSError:
                 pass
-        if getattr(self.writer, "close", None) is not None:
+
+    def sync_close(self) -> None:
+        """Unregister the read fd and close fds without awaiting (cleanup-safe).
+
+        ``remove_reader`` is best-effort here because the loop may already be
+        closing when a test cleanup runs; the fds are closed directly so no
+        thread has to be joined.
+        """
+        self._closed = True
+        loop = self._get_loop()
+        if loop.is_running():
             try:
-                self.writer.close()
-            except Exception:
+                loop.remove_reader(self._read_fd)
+            except (RuntimeError, ValueError, FileNotFoundError):
                 pass
+        for fd in (self._read_fd, self._write_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+class PipeWebSocket:
+    """Duck-typed websocket adapter backed by the Chrome pipe fd pair.
+
+    nodriver's Connection calls ``send(str)``, ``recv() -> str``, ``close()``,
+    and inspects ``close_code`` on its websocket. This adapter exposes the same
+    surface, backed by the NUL-delimited JSON frames on the pipe. It lets a
+    pipe-launched Chrome satisfy nodriver without opening any TCP port or real
+    websocket.
+    """
+
+    def __init__(
+        self,
+        read_fd: int,
+        write_fd: int,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> None:
+        import websockets.exceptions
+
+        self._read_fd = read_fd
+        self._write_fd = write_fd
+        # Bind the loop that is already running; never get_event_loop(). The
+        # loop is passed to the wrapped client so both share one loop.
+        self._loop = loop or asyncio.get_running_loop()
+        self._client = PipeCDPClient(read_fd, write_fd, self._loop)
+        self.close_code = None
+        self.closed = True
+        self.websocket_url = "ws://pipe"
+        self._exceptions = websockets.exceptions
+
+    async def start(self) -> "PipeWebSocket":
+        await self._client.start()
+        self.closed = False
+        return self
+
+    async def recv(self) -> str:
+        """Return the next NUL-delimited message or raise on timeout/EOF.
+
+        nodriver's listener polls ``recv()`` with a 0.05s timeout, so a missing
+        frame must raise ``asyncio.TimeoutError`` to let the loop retry, and an
+        EOF must raise ``websockets.exceptions.ConnectionClosed`` to let the
+        listener tear down.
+        """
+        try:
+            frame = await self._client.get_frame(0.05)
+        except CdpPipeError:
+            raise self._exceptions.ConnectionClosed("pipe closed")
+        return json.dumps(frame)
+
+    async def send(self, message: str) -> None:
+        os.write(self._write_fd, message.encode("utf-8") + _NUL)
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.close_code = 1000
+        await self._client.close()
+
+    def sync_close(self) -> None:
+        """Stop and close the adapter without awaiting (cleanup-safe).
+
+        Delegates to the wrapped client's :meth:`PipeCDPClient.sync_close` so a
+        SYNC addCleanup can tear the reader down from the adapter's loop.
+        """
+        self.closed = True
+        self.close_code = 1000
+        self._client.sync_close()
+
+
+class PipeConnection:
+    """Reuses nodriver.Connection over a PipeWebSocket with no TCP port.
+
+    nodriver's Connection lazily opens a websocket via ``websockets.connect``.
+    Instead, a nodriver Connection instance is created with its ``_websocket``
+    pre-set to a :class:`PipeWebSocket`, so every ``send``/``recv``/``close`` is
+    served by the pipe.
+    """
+
+    def __init__(self, browser, websocket: PipeWebSocket) -> None:
+        import nodriver.core.connection as _conn
+
+        self._browser = browser
+        self._ws = websocket
+        self._conn_cls = _conn.Connection
+        # Reuse nodriver's Connection instance but inject our websocket.
+        self._real = self._conn_cls("ws://pipe", browser=browser)
+        self._real._websocket = websocket
+
+    @property
+    def websocket(self):
+        return self._ws
+
+    @property
+    def closed(self):
+        return self._ws.closed
+
+    async def connect(self, **kwargs):
+        if self._ws.closed:
+            await self._ws.start()
+        await self._real._register_handlers()
+
+    async def disconnect(self):
+        if self._ws is not None:
+            await self._ws.close()
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
