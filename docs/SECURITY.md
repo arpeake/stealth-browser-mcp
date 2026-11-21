@@ -26,14 +26,13 @@ default and STEALTH_CDP_TRANSPORT unset, empty, or "port" keeps that
 behavior unchanged. Attaching to an already-running external browser
 still needs the port.
 
-Status: experimental and not yet wired (Phase 2). The STEALTH_CDP_TRANSPORT=pipe
-flag is intentionally NOT connected into launch_browser() because it is
-unproven in this environment: nodriver's Browser.start() is hardwired to an
-HTTP endpoint and a ws:// URL and cannot complete over a pipe, and Chrome does
-not expose a usable remote-debugging pipe here. The pipe path is not operational
-until both are resolved; the port path remains the only working transport and
-matches the opt-in contract (default unchanged). The unit tests cover flag
-parsing, argv building, and CDP framing without a browser.
+Status: wired in-package via PipeBrowser subclass of nodriver.Browser.start,
+using Target.setDiscoverTargets, getTargets, and attachToTarget with flattened
+sessions. NOTE: the gated real-browser test (tests/test_sb_post1_cdp_pipe_real.py)
+was not run to completion in this session because the harness command working
+directory is pinned to /home/arpeake/stealth-mcp-1119/venv/lib/python3.14/site-packages/nodriver,
+where Python unittest cannot import 'tests'. Status remains opt-in pending
+verification run in the worktree directory.
 
 ## HTTP
 
