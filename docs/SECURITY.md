@@ -17,6 +17,17 @@ loopback-only and is documented here rather than treated as a release
 blocker. Attaching to a browser that is already running still needs the
 port.
 
+An opt-in transport closes this gap for browsers this server spawns.
+Set STEALTH_CDP_TRANSPORT=pipe to launch spawned Chrome with
+--remote-debugging-pipe instead of a loopback --remote-debugging-port
+(see src/stealth_browser_mcp/cdp_pipe.py). CDP then runs over inherited
+pipes and no DevTools TCP port is opened. The loopback port stays the
+default and STEALTH_CDP_TRANSPORT unset, empty, or "port" keeps that
+behavior unchanged. Attaching to an already-running external browser
+still needs the port. This transport is experimental until it is proven
+in a real browser (Phase 2); the unit tests cover flag parsing, argv
+building, and CDP framing without a browser.
+
 ## HTTP
 
 HTTP transport always requires a bearer token, binds to loopback by
