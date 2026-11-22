@@ -156,7 +156,7 @@ class ExportDebugLogsWriteRootTests(unittest.IsolatedAsyncioTestCase):
                     await export_debug_logs.fn(filename=str(victim), format="json")
                 self.assertEqual(victim.read_text(encoding="utf-8"), "KEEP-ME")
                 dest = Path(await export_debug_logs.fn(filename=str(exp / "debug.json"), format="json"))
-                self.assertEqual(dest.parent, exp)
+                self.assertEqual(dest.parent.resolve(), exp.resolve())
                 self.assertTrue(dest.is_file())
                 if os.name == "posix":
                     self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o600)
