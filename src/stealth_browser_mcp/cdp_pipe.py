@@ -221,48 +221,10 @@ def open_chrome_pipe() -> PipeDescriptors:
     return PipeDescriptors(cmd_r, cmd_w, resp_r, resp_w)
 
 
-def spawn_chrome_with_pipe(
-    executable: str,
-    launch_args: List[str],
-    *,
-    stdin: Any = asyncio.subprocess.DEVNULL,
-    stdout: Any = asyncio.subprocess.DEVNULL,
-    stderr: Any = asyncio.subprocess.DEVNULL,
-) -> Tuple[Any, PipeDescriptors]:
-    """Spawn Chrome over ``--remote-debugging-pipe`` with its fds mapped.
-
-    Chrome's plain pipe reads CDP commands from fd 3 and writes responses and
-    events on fd 4. We create two ``os.pipe()`` pairs, map the child's fd 3 to
-    the read end of our command pipe and fd 4 to the write end of our response
-    pipe, then close the unused ends in the parent. ``close_fds`` must stay
-    False so the inherited descriptors are not closed before Chrome starts.
-
-    Args:
-        executable (str): Path to the Chrome/Chromium executable.
-        launch_args (List[str]): Chrome arguments; must include
-            ``--remote-debugging-pipe``.
-        stdin: Child standard input (defaults to the null device).
-        stdout: Child standard output (defaults to the null device).
-        stderr: Child standard error (defaults to the null device).
-
-    Returns:
-        Tuple[asyncio.subprocess.Process, PipeDescriptors]: The launched child
-        and the descriptor bundle the parent uses (``command_w`` to write,
-        ``response_r`` to read).
-    """
-    descriptors = open_chrome_pipe()
-    process = asyncio.create_subprocess_exec(
-        executable,
-        *launch_args,
-        stdin=stdin,
-        stdout=stdout,
-        stderr=stderr,
-        close_fds=False,
-        preexec_fn=descriptors.map_child_fds(),
-    )
-    # The child inherits its own copies via dup2; close the parent's unused ends.
-    descriptors.close_parent_unused()
-    return process, descriptors
+# A single frame must not grow past this without a NUL delimiter. A longer
+# buffer means the peer never terminates a frame, which would otherwise let a
+# misbehaving Chrome accumulate unbounded memory in _buffer.
+MAX_FRAME_SIZE = 64 * 1024 * 1024
 
 
 class PipeCDPClient:
@@ -413,23 +375,27 @@ class PipeCDPClient:
         """Selector callback for the read fd; runs on the event loop.
 
         The selector wakes us only when data is readable, so the loop is never
-        blocked waiting on a read. This pulls a chunk, feeds the length-
-        delimited parser, and dispatches completed frames to awaiting callers.
+        blocked waiting on a read. This pulls a chunk, feeds the NUL-framed
+        parser, and dispatches completed frames to awaiting callers.
         """
         if self._closed:
             return
         try:
             data = os.read(self._read_fd, 65536)
         except OSError:
-            # Pipe closed or the fd was removed during teardown.
+            # Pipe closed or the fd was removed during teardown. Stop reading
+            # and fail every in-flight call so no caller hangs.
+            self._shutdown()
             return
         if not data:
-            # EOF: peer closed its write end; stop reading.
-            self._closed = True
-            self._frames.put_nowait(_EOF)
-            for q_list in list(self._session_queues.values()):
-                for q in q_list:
-                    q.put_nowait(_EOF)
+            # EOF: peer closed its write end; stop reading and fail pending.
+            self._shutdown()
+            return
+        if len(self._buffer) + len(data) > MAX_FRAME_SIZE:
+            # A frame longer than MAX_FRAME_SIZE never gets a NUL delimiter;
+            # fail via the shutdown path so the reader is unregistered and
+            # in-flight calls see CdpPipeError instead of hanging.
+            self._shutdown()
             return
         self._buffer += data
         frames, leftover = split_nul_frames(self._buffer)
@@ -482,52 +448,57 @@ class PipeCDPClient:
         loop.add_reader(self._read_fd, self._on_readable)
         return self
 
-    async def close(self) -> None:
-        """Unregister the read fd and close the pipe ends (await from our loop).
+    def _shutdown(self) -> None:
+        """Idempotent teardown shared by every shutdown path.
 
-        Removing the fd from the selector is the only cleanup the loop needs;
-        there is no executor thread or reader task to cancel or await.
+        Removes the read fd from the selector first so the loop stops waking on
+        an fd at EOF (which otherwise stays readable and spins). Then fails
+        every in-flight call with :class:`CdpPipeError` so no caller hangs on a
+        pipe that is already closed. Finally closes the fds. Safe to call more
+        than once.
         """
         self._closed = True
-        self._frames.put_nowait(_EOF)
-        for q_list in list(self._session_queues.values()):
-            for q in q_list:
-                q.put_nowait(_EOF)
-        loop = self._get_loop()
+        loop = None
         try:
-            loop.remove_reader(self._read_fd)
-        except (RuntimeError, ValueError, FileNotFoundError):
-            pass
-        self._pending.clear()
-        for fd in (self._read_fd, self._write_fd):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-
-    def sync_close(self) -> None:
-        """Unregister the read fd and close fds without awaiting (cleanup-safe).
-
-        ``remove_reader`` is best-effort here because the loop may already be
-        closing when a test cleanup runs; the fds are closed directly so no
-        thread has to be joined.
-        """
-        self._closed = True
-        self._frames.put_nowait(_EOF)
-        for q_list in list(self._session_queues.values()):
-            for q in q_list:
-                q.put_nowait(_EOF)
-        loop = self._get_loop()
-        if loop.is_running():
+            loop = self._get_loop()
+        except (RuntimeError, ValueError):
+            loop = None
+        if loop is not None:
             try:
                 loop.remove_reader(self._read_fd)
             except (RuntimeError, ValueError, FileNotFoundError):
                 pass
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(CdpPipeError("pipe closed"))
+        self._pending.clear()
+        self._frames.put_nowait(_EOF)
+        for q_list in list(self._session_queues.values()):
+            for q in q_list:
+                q.put_nowait(_EOF)
         for fd in (self._read_fd, self._write_fd):
             try:
                 os.close(fd)
             except OSError:
                 pass
+
+    async def close(self) -> None:
+        """Unregister the read fd, fail pending calls, and close the fds.
+
+        Removing the fd from the selector is the only cleanup the loop needs;
+        there is no executor thread or reader task to cancel or await.
+        """
+        self._shutdown()
+
+    def sync_close(self) -> None:
+        """Idempotent, await-free shutdown for cleanup-safe teardown.
+
+        Uses :meth:`_shutdown` so the fd is removed before the pending futures
+        are failed, then closes the fds directly so no thread has to be
+        joined. ``remove_reader`` is best-effort here because the loop may
+        already be closing when a test cleanup runs.
+        """
+        self._shutdown()
 
 
 class PipeWebSocket:

@@ -1,11 +1,12 @@
 """Chrome process launch with a patient DevTools handshake and no leaked processes."""
 
 import asyncio
+import os
 import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 import nodriver as uc
 import psutil
@@ -26,6 +27,44 @@ DEVTOOLS_READY_TIMEOUT = 30.0
 DEVTOOLS_POLL_INTERVAL = 0.05
 PROCESS_EXIT_TIMEOUT = 3.0
 ACTIVE_PORT_FILE = "DevToolsActivePort"
+
+# The two child fds that carry CDP over the pipe: fd 3 (commands) and fd 4
+# (responses). They must stay open across the exec so preexec can map them onto
+# the pipe ends; listing them in pass_fds keeps them open with close_fds=True.
+CHILD_CDP_FDS = (3, 4)
+
+
+def _fd_is_open(fd: int) -> bool:
+    """Return True when fd currently refers to an open file in this process."""
+    try:
+        os.fstat(fd)
+        return True
+    except OSError:
+        return False
+
+
+def prepare_child_pipe_launch(
+    descriptors: PipeDescriptors,
+) -> Tuple[Tuple[int, ...], Callable[[], None]]:
+    """Prepare pass_fds and preexec_fn for child CDP pipe inheritance.
+
+    Ensures child CDP fds (3 and 4) are open in the parent (opening /dev/null
+    dummies if needed) so they can be passed to pass_fds under close_fds=True,
+    and returns (pass_fds, preexec_fn).
+    """
+    kept_fds = [
+        descriptors.command_r,
+        descriptors.command_w,
+        descriptors.response_r,
+        descriptors.response_w,
+    ]
+    for child_fd in CHILD_CDP_FDS:
+        if not _fd_is_open(child_fd):
+            dummy = os.open(os.devnull, os.O_RDONLY)
+            os.dup2(dummy, child_fd)
+            os.close(dummy)
+        kept_fds.append(child_fd)
+    return tuple(kept_fds), descriptors.map_child_fds()
 
 
 def _is_listening(pid: int, port: int) -> bool:
@@ -74,17 +113,30 @@ async def _stop_process(process: Any, browser: Optional[Any] = None) -> None:
     """
     Terminate a process, killing it if it does not exit in time.
 
+    On every exit path the shared pipe shutdown runs first (remove_reader,
+    fail pending futures, then close fds) so no caller hangs on a pipe whose
+    peer has already gone. The browser's client is used when present so the
+    read fd is unregistered on the right loop; descriptors.close() is a
+    fallback for the failure path where the client may not exist.
+
     Args:
         process: Process to stop.
         browser: Optional browser instance to exit gracefully via CDP Browser.close.
     """
+    client = getattr(browser, "_client", None)
+    descriptors = getattr(browser, "_descriptors", None)
+
+    async def _shutdown() -> None:
+        if client is not None and hasattr(client, "sync_close"):
+            client.sync_close()
+        elif descriptors is not None:
+            descriptors.close()
+
     if getattr(process, "returncode", None) is not None:
-        if browser is not None and hasattr(browser, "_descriptors") and browser._descriptors is not None:
-            browser._descriptors.close()
+        await _shutdown()
         return
     if hasattr(process, "poll") and process.poll() is not None:
-        if browser is not None and hasattr(browser, "_descriptors") and browser._descriptors is not None:
-            browser._descriptors.close()
+        await _shutdown()
         return
 
     if browser is not None and getattr(browser, "connection", None) is not None:
@@ -96,8 +148,7 @@ async def _stop_process(process: Any, browser: Optional[Any] = None) -> None:
                     await asyncio.wait_for(wait_res, 10.0)
                 else:
                     await asyncio.to_thread(process.wait, 10.0)
-                if hasattr(browser, "_descriptors") and browser._descriptors is not None:
-                    browser._descriptors.close()
+                await _shutdown()
                 return
         except Exception:
             pass
@@ -114,18 +165,15 @@ async def _stop_process(process: Any, browser: Optional[Any] = None) -> None:
                     await asyncio.wait_for(wait_res, PROCESS_EXIT_TIMEOUT)
                 else:
                     await asyncio.to_thread(process.wait, PROCESS_EXIT_TIMEOUT)
-            if browser is not None and hasattr(browser, "_descriptors") and browser._descriptors is not None:
-                browser._descriptors.close()
+            await _shutdown()
             return
         except ProcessLookupError:
-            if browser is not None and hasattr(browser, "_descriptors") and browser._descriptors is not None:
-                browser._descriptors.close()
+            await _shutdown()
             return
         except Exception:
             continue
 
-    if browser is not None and hasattr(browser, "_descriptors") and browser._descriptors is not None:
-        browser._descriptors.close()
+    await _shutdown()
 
 
 class PipeTab(Tab):
@@ -348,9 +396,27 @@ class PipeBrowser(Browser):
             return conn
 
     def stop(self):
-        super().stop()
-        if self._descriptors:
+        # Tear the pipe client down first so the reader is unregistered before
+        # nodriver closes the process. Browser.stop() dereferences
+        # self.connection, so skip it when start() never connected; still
+        # terminate a process if one was attached.
+        client = getattr(self, "_client", None)
+        if client is not None and hasattr(client, "sync_close"):
+            client.sync_close()
+        elif self._descriptors:
             self._descriptors.close()
+        if getattr(self, "connection", None) is not None:
+            super().stop()
+            return
+        process = getattr(self, "_process", None)
+        if process is not None:
+            try:
+                process.terminate()
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
 
 
 async def launch_browser(
@@ -397,14 +463,16 @@ async def launch_browser(
         launch_args = build_chrome_launch_args(launch_args, transport=CdpTransport.PIPE)
 
         descriptors = open_chrome_pipe()
+        pass_fds, preexec_fn = prepare_child_pipe_launch(descriptors)
         process = await asyncio.create_subprocess_exec(
             config.browser_executable_path,
             *launch_args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            close_fds=False,
-            preexec_fn=descriptors.map_child_fds(),
+            close_fds=True,
+            pass_fds=pass_fds,
+            preexec_fn=preexec_fn,
         )
         descriptors.close_parent_unused()
 
@@ -415,7 +483,11 @@ async def launch_browser(
             await asyncio.wait_for(browser.start(), timeout=timeout)
             return browser
         except BaseException:
-            descriptors.close()
+            client = getattr(browser, "_client", None)
+            if client is not None and hasattr(client, "sync_close"):
+                client.sync_close()
+            else:
+                descriptors.close()
             await _stop_process(process)
             if not config.uses_custom_data_dir:
                 shutil.rmtree(config.user_data_dir, ignore_errors=True)

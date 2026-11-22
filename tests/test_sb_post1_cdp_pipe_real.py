@@ -38,6 +38,11 @@ class CdpPipeRealBrowserTests(unittest.IsolatedAsyncioTestCase):
         if not RUN_BROWSER_TESTS:
             self.skipTest("STEALTH_BROWSER_TESTS is not set; skipping real browser test")
 
+        # Select and verify the pipe transport and headless mode from inside the
+        # test so it is self-contained (still gated on STEALTH_BROWSER_TESTS).
+        os.environ["STEALTH_CDP_TRANSPORT"] = "pipe"
+        os.environ["STEALTH_WINDOW_MODE"] = "headless"
+
     async def test_pipe_transport_headless(self) -> None:
         executable = check_browser_executable() or "/usr/bin/google-chrome"
         if not os.path.exists(executable):
