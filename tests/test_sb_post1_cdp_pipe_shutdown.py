@@ -395,6 +395,7 @@ class PipeBrowserEarlyFailureTests(unittest.IsolatedAsyncioTestCase):
             "Temporary user_data_dir should be removed on failure when uses_custom_data_dir is False",
         )
 
+    @unittest.skipUnless(sys.platform != "win32", "preexec_fn and pass_fds are Unix-only")
     async def test_pipe_browser_init_failure_with_child_process(self) -> None:
         orig_transport = os.environ.get("STEALTH_CDP_TRANSPORT")
         os.environ["STEALTH_CDP_TRANSPORT"] = "pipe"
