@@ -560,7 +560,10 @@ async def launch_browser(
             else:
                 descriptors.close()
             await _stop_process(process)
-            clear_profile_locks(config.user_data_dir)
+            # Code 21 means another process still holds this profile.
+            # Do not unlink its SingletonLock.
+            if getattr(process, "returncode", None) != 21:
+                clear_profile_locks(config.user_data_dir)
             if not config.uses_custom_data_dir:
                 shutil.rmtree(config.user_data_dir, ignore_errors=True)
             raise
@@ -612,7 +615,10 @@ async def launch_browser(
         return browser
     except BaseException:
         await _stop_process(process)
-        clear_profile_locks(config.user_data_dir)
+        # Code 21 means another process still holds this profile.
+        # Do not unlink its SingletonLock.
+        if getattr(process, "returncode", None) != 21:
+            clear_profile_locks(config.user_data_dir)
         if not config.uses_custom_data_dir:
             shutil.rmtree(config.user_data_dir, ignore_errors=True)
         raise

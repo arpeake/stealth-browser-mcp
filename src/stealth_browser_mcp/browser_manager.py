@@ -874,7 +874,11 @@ class BrowserManager:
             except Exception:
                 pass
             target_profile = options.user_data_dir
-            if target_profile:
+            err_str = str(e)
+            profile_held = ("code 21" in err_str) or ("profile in use" in err_str)
+            # Only clear locks this spawn created. If Chrome exited because
+            # the profile is already in use, leave the holder's lock alone.
+            if target_profile and not profile_held:
                 clear_profile_locks(target_profile)
             async with self._lock:
                 self._instances.pop(instance_id, None)
@@ -882,8 +886,7 @@ class BrowserManager:
             self.dialog_manager.clear_instance(instance_id)
             instance.state = BrowserState.ERROR
 
-            err_str = str(e)
-            if "code 21" in err_str or "profile in use" in err_str:
+            if profile_held:
                 holder_id = None
                 if target_profile:
                     norm_tp = os.path.abspath(os.path.realpath(target_profile))

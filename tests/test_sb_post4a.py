@@ -471,5 +471,27 @@ class SpawnTimeoutAndProfileInUseTests(unittest.TestCase):
             self.assertNotIn("Browser exited during startup with code 21\n", err_msg)
 
 
+
+    def test_exit_code_21_does_not_clear_live_profile_lock(self):
+        lock_file = Path(self.temp_dir) / "SingletonLock"
+        lock_file.write_text("other-process")
+
+        async def code_21_launch(config, timeout=60.0, args_modifier=None, on_process_started=None):
+            raise Exception("Browser exited during startup with code 21")
+
+        with mock.patch("stealth_browser_mcp.browser_manager.launch_browser", side_effect=code_21_launch):
+            with self.assertRaises(Exception) as ctx:
+                asyncio.run(
+                    self.bm.spawn_browser(
+                        user_data_dir=self.temp_dir,
+                        headless=True,
+                    )
+                )
+
+            self.assertIn("profile in use", str(ctx.exception))
+            self.assertTrue(lock_file.exists())
+            self.assertEqual(lock_file.read_text(), "other-process")
+
+
 if __name__ == "__main__":
     unittest.main()
