@@ -182,8 +182,8 @@ class BadTokenImportTests(unittest.TestCase):
                     sys.executable,
                     "-c",
                     "import stealth_browser_mcp.server as s; "
-                    "assert s._TOKEN_CONFIG_ERROR is not None; "
-                    "print('IMPORTED')",
+                    "print('IMPORTED'); "
+                    "print('TOKEN_ERROR' if s._TOKEN_CONFIG_ERROR is not None else 'TOKEN_OK')",
                 ],
                 env=env,
                 capture_output=True,
@@ -191,6 +191,13 @@ class BadTokenImportTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("IMPORTED", proc.stdout)
+            # Unix mode bits (0644) are a token-config error on POSIX. Windows
+            # file modes are not POSIX permission bits, so the same chmod does
+            # not raise, and import must still succeed without crashing.
+            if os.name == "posix":
+                self.assertIn("TOKEN_ERROR", proc.stdout)
+            else:
+                self.assertIn("TOKEN_OK", proc.stdout)
 
 
 class UnsupportedProtocolTests(unittest.IsolatedAsyncioTestCase):
