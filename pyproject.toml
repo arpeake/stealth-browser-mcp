@@ -46,10 +46,10 @@ dev = [
 
 # Repository metadata
 [project.urls]
-Homepage = "https://github.com/vibheksoni/stealth-browser-mcp"
-Documentation = "https://github.com/vibheksoni/stealth-browser-mcp#readme"
-Repository = "https://github.com/vibheksoni/stealth-browser-mcp.git"
-Issues = "https://github.com/vibheksoni/stealth-browser-mcp/issues"
+Homepage = "https://github.com/arpeake/stealth-browser-mcp"
+Documentation = "https://github.com/arpeake/stealth-browser-mcp#readme"
+Repository = "https://github.com/arpeake/stealth-browser-mcp.git"
+Issues = "https://github.com/arpeake/stealth-browser-mcp/issues"
 
 [tool.hatch.version]
 path = "src/stealth_browser_mcp/__init__.py"
